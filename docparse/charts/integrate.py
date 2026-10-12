@@ -99,10 +99,15 @@ def with_caption(table_html: str, caption: str) -> str:
 
 
 def enhance_chart_blocks(blocks: list[dict[str, Any]], page: pymupdf.Page, tl: TextLayerPage) -> list[dict[str, Any]]:
-    chart_idx = [i for i, b in enumerate(blocks) if b["label"] == "chart" and b.get("bbox") is not None]
+    # A chart the VLM labelled `image` but still tabulated is a chart (the `image`
+    # label is otherwise dropped from the markdown, table included).
+    out = [
+        {**b, "label": "chart"} if b["label"] == "image" and "<table" in b.get("text", "") and b.get("bbox") is not None else b
+        for b in blocks
+    ]
+    chart_idx = [i for i, b in enumerate(out) if b["label"] == "chart" and b.get("bbox") is not None]
     if not chart_idx or tl.scanned:
         return blocks
-    out = list(blocks)
     seen: set[tuple[str, str, str]] = set()
     extras: list[dict[str, Any]] = []
     vlm_record = None
