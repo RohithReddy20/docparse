@@ -20,10 +20,14 @@ import os
 from pathlib import Path
 
 import modal
-from dotenv import dotenv_values
 
 ROOT = Path(__file__).resolve().parent.parent
-ENV = {k: v for k, v in dotenv_values(ROOT / ".env").items() if v}
+try:  # only needed locally; the module is also imported inside the container
+    from dotenv import dotenv_values
+
+    ENV = {k: v for k, v in dotenv_values(ROOT / ".env").items() if v}
+except Exception:  # noqa: BLE001
+    ENV = {}
 VOL_PATH = "/vol"
 BENCH_DIR = f"{VOL_PATH}/bench"
 DPI = 200
