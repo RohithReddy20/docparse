@@ -190,6 +190,13 @@ def _heading_signature(bbox: list[float], tl: TextLayerPage | None) -> bool:
     return bold or big
 
 
+def text_digit_heavy(bbox: list[float], tl: TextLayerPage | None) -> bool:
+    if tl is None or not tl.has_text or tl.scanned:
+        return False
+    text = " ".join(ln.text for ln in _lines_in_bbox(tl, bbox)).strip()
+    return bool(text) and sum(c.isdigit() for c in text) > len(text) / 3
+
+
 def _relabel(block: dict[str, Any], det_label: str, tl: TextLayerPage | None) -> str:
     """Detector class vs VLM class. Headings are never demoted by the detector's
     generic `text`; promotion to a heading needs the text layer to agree; furniture
@@ -276,6 +283,8 @@ def detector_items(
                 nb["_key"] = (located.index(b), 0)
                 items.append(nb)
             continue
+        if label in HEADING and text_digit_heavy(d["bbox"], tl):
+            label = "text"  # KPI figures / years the detector calls headings are Text in the GT (65%)
         if label == "text":
             # A VLM heading that the detector folded into generic text, or a line
             # with DocLayNet's heading signature (own short line, bold / larger).
@@ -285,7 +294,8 @@ def detector_items(
             elif len(inside) <= 1 and _heading_signature(d["bbox"], tl):
                 label = "section_header"
         text = ""
-        if tl is not None and tl.has_text and not tl.scanned and label in TEXTUAL:
+        if tl is not None and tl.has_text and not tl.scanned and (label in TEXTUAL or label in ("image", "chart")):
+            # pictures too: infographic text inside a figure is what attribution scores
             text = " ".join(ln.text.strip() for ln in _lines_in_bbox(tl, d["bbox"]))
         if not text and over:
             best = max(over, key=lambda b: _inter(b["bbox"], d["bbox"]))
