@@ -115,9 +115,53 @@ def renormalize_eval(source: str, target: str, test: bool = False) -> str:
     _sh([*py, "inference", "renormalize", str(dst), "--pipeline_name", target, "--force"], BENCH_DIR)
     rc = _sh([*py, "run", target, "--skip_inference", *(["--test"] if test else [])], BENCH_DIR)
     vol.commit()
-    return f"rc={rc}"
+    table = subprocess.run(
+        [sys.executable, "-c", "import docparse.oracle; docparse.oracle.main()", source, target],
+        cwd=BENCH_DIR, capture_output=True, text=True,
+    )
+    return f"rc={rc}\n{table.stdout}{table.stderr[-500:]}"
+
+
+@app.function(image=image, volumes={VOL_PATH: vol}, cpu=1, memory=2048, timeout=600)
+def sizes(pipeline: str) -> str:
+    out = Path(BENCH_DIR) / "output" / pipeline
+    def total(pattern: str) -> int:
+        return sum(f.stat().st_size for f in out.rglob(pattern))
+    return (
+        f"raw={total('*.raw.json') / 1e6:.1f}MB result={total('*.result.json') / 1e6:.1f}MB "
+        f"reports={total('_evaluation_report.json') / 1e6:.1f}MB html={total('*.html') / 1e6:.1f}MB"
+    )
+
+
+@app.function(image=image, volumes={VOL_PATH: vol}, cpu=1, memory=2048, timeout=900)
+def pack_raw(pipeline: str) -> str:
+    """Tar+gzip a pipeline's raw VLM outputs (small) for download: output/<pipeline>/<group>/*.raw.json."""
+    import tarfile
+
+    out = Path(BENCH_DIR) / "output"
+    tgz = Path(BENCH_DIR) / f"raw_{pipeline}.tgz"
+    with tarfile.open(tgz, "w:gz") as tf:
+        for f in sorted((out / pipeline).rglob("*.raw.json")):
+            tf.add(f, arcname=str(f.relative_to(out)))
+        tf.add(out / pipeline / "_metadata.json", arcname=f"{pipeline}/_metadata.json")
+    vol.commit()
+    return f"{tgz.relative_to(VOL_PATH)} {tgz.stat().st_size / 1e6:.1f}MB"
 
 
 @app.local_entrypoint()
-def main(pipeline: str = "lightonocr3_0_8b_grounding", max_concurrent: int = 16, test: bool = False, extra: str = ""):
-    print(run.remote(pipeline, max_concurrent, test, extra))
+def main(
+    pipeline: str = "lightonocr3_0_8b_grounding",
+    max_concurrent: int = 16,
+    test: bool = False,
+    extra: str = "",
+    mode: str = "run",
+    target: str = "docparse_hybrid_v0",
+):
+    if mode == "run":
+        print(run.remote(pipeline, max_concurrent, test, extra))
+    elif mode == "renorm":
+        print(renormalize_eval.remote(pipeline, target, test))
+    elif mode == "sizes":
+        print(sizes.remote(pipeline))
+    elif mode == "pack":
+        print(pack_raw.remote(pipeline))
