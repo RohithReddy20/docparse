@@ -25,9 +25,10 @@ PDF page ─┬─ text layer (PyMuPDF, CPU)  : spans + styling + drawings
             • lines the VLM skipped recovered as blocks; header/footer/page-number
               lifted into structured fields
             • scanned pages (raster covers the page) keep the VLM output whole
-          layout     (docparse/fusion.py) — PP-DocLayout-V3 boxes are the layout
-            elements (GT was seeded by this detector family), text attributed from
-            the layer; VLM blocks fill what the detector misses; markdown untouched
+          layout     (docparse/fusion.py) — Docling heron (RT-DETRv2, the 17
+            Canonical17 classes ParseBench's GT uses; serve/modal_heron_dump.py)
+            boxes are the layout elements, text attributed from the layer; VLM
+            blocks fill what the detector misses; markdown untouched
           charts     (docparse/charts/)
             • VLM table snapped to printed data labels (textlabels.snap_table)
             • extra candidate tables from text labels and from vector bars/lines
@@ -40,7 +41,8 @@ rows, so every difference is the CPU-side reconciliation):
 | | table | chart | content | formatting | layout | overall |
 |---|---|---|---|---|---|---|
 | LightOnOCR-3-0.8B alone (our provider) | 83.5 | 61.0 | 88.9 | 64.7 | 66.0 | 72.8 |
-| docparse_hybrid_v0 (+ PP-DocLayout-V3 fusion) | 83.5 | 70.4 | 89.0 | 70.6 | 73.8 | **77.5** |
+| docparse_hybrid_v0 (+ PP-DocLayout-V3 fusion) | 83.5 | 70.4 | 89.0 | 70.6 | 73.8 | 77.5 |
+| docparse_hybrid_v0 (+ Docling heron fusion) | 83.5 | 70.4 | 89.0 | 70.6 | **79.9** | **78.7** |
 | LlamaParse Cost Effective (leaderboard) | 84.2 | 77.9 | 89.9 | 67.3 | 83.8 | 80.6 |
 | best open-weight single model (leaderboard) | 86.4 | 64.9 | 88.8 | 71.7 | 74.3 | 77.2 |
 

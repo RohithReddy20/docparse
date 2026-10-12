@@ -61,7 +61,7 @@ VISUAL = {"image", "chart", "table", "formula", "header_image", "footer_image"}
 
 def load_detections(source_pdf: str, layout_dir: str | None = None) -> dict[str, Any] | None:
     """Per-page detections dumped by serve/modal_layout_dump.py, if present."""
-    root = Path(layout_dir or os.getenv("DOCPARSE_LAYOUT_DIR", "output/layout_v3"))
+    root = Path(layout_dir or os.getenv("DOCPARSE_LAYOUT_DIR", "output/layout_heron"))
     p = Path(source_pdf)
     cand = root / p.parent.name / (p.stem + ".json")
     if not cand.exists():
