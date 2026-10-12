@@ -116,16 +116,14 @@ def fuse(blocks: list[dict[str, Any]], page_dets: dict[str, Any], tl: TextLayerP
                     b["label"] = d["label"]
                 used_dets.add(j)
             elif d["label"] in TEXTUAL and b["label"] in TEXTUAL and frac_d >= 0.3:
-                if d["label"] != b["label"]:
-                    b["label"] = d["label"]
-                    b["text"] = _retitle(b["text"], d["label"])
+                new_label = _relabel(b, d["label"], tl)
+                if new_label != b["label"]:
+                    b["label"] = new_label
+                    if new_label in ("title", "section_header") and not re.match(r"^\s*#", b["text"]):
+                        b["text"] = _retitle(b["text"], new_label)
                 used_dets.add(j)
         elif len(ms) > 1:
             used_dets.add(j)
-            if d["label"] in VISUAL:
-                for i in ms:
-                    if out[i] is not None and out[i]["label"] in TEXTUAL and _inter(out[i]["bbox"], d["bbox"]) / _area(out[i]["bbox"]) > 0.9:
-                        out[i]["label"] = d["label"] if d["label"] != "table" else out[i]["label"]
     # blocks spanning several detector boxes -> split by text-layer lines
     for i, b in located:
         js = [j for j in cover.get(i, []) if dets[j]["label"] in TEXTUAL]
@@ -146,6 +144,41 @@ def fuse(blocks: list[dict[str, Any]], page_dets: dict[str, Any], tl: TextLayerP
                 extras.append({"label": d["label"], "continuation": False, "bbox": list(d["bbox"]), "text": "", "source": "detector"})
     result = [b for b in out if b is not None] + extras
     return result
+
+
+HEADING = {"title", "section_header"}
+FURNITURE = {"header", "footer", "page_number", "header_image", "footer_image"}
+
+
+def _emphasized(block: dict[str, Any], tl: TextLayerPage | None) -> bool:
+    """DocLayNet heading test on the text layer: own short line(s), bold or larger."""
+    if tl is None or not tl.has_text or tl.scanned:
+        return False
+    lines = _lines_in_bbox(tl, block["bbox"])
+    spans = [s for ln in lines for s in ln.spans if s.text.strip()]
+    if not spans or len(lines) > 3 or len(" ".join(ln.text for ln in lines)) > 120:
+        return False
+    bold = sum(s.bold for s in spans) / len(spans) >= 0.8
+    big = all(s.size >= tl.body_size + 0.9 for s in spans)
+    return bold or big
+
+
+def _relabel(block: dict[str, Any], det_label: str, tl: TextLayerPage | None) -> str:
+    """Detector class vs VLM class. Headings are never demoted by the detector's
+    generic `text`; promotion to a heading needs the text layer to agree; furniture
+    and caption/footnote labels come from the detector."""
+    cur = block["label"]
+    if det_label == cur:
+        return cur
+    if det_label in HEADING:
+        return det_label if (cur in HEADING or _emphasized(block, tl)) else cur
+    if cur in HEADING:
+        return cur
+    if det_label in FURNITURE or det_label in ("caption", "footnote"):
+        return det_label
+    if det_label in ("text", "list", "aside_text") and cur in FURNITURE:
+        return cur
+    return det_label
 
 
 def _retitle(text: str, label: str) -> str:
