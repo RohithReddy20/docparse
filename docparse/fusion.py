@@ -45,6 +45,11 @@ DET_LABEL: dict[str, str] = {
     "footnote": "footnote", "vision_footnote": "footnote",
     "header": "header", "header_image": "header_image", "footer": "footer", "footer_image": "footer_image",
     "number": "page_number",
+    # Docling heron / Canonical17 names (docling-layout-heron)
+    "Caption": "caption", "Footnote": "footnote", "Formula": "formula", "List-item": "list",
+    "Page-footer": "footer", "Page-header": "header", "Picture": "image", "Section-header": "section_header",
+    "Table": "table", "Text": "text", "Title": "title", "Document Index": "text", "Code": "text",
+    "Checkbox-Selected": "text", "Checkbox-Unselected": "text", "Form": "text", "Key-Value Region": "text",
 }
 TEXTUAL = {"title", "section_header", "text", "aside_text", "list", "caption", "footnote", "header", "footer", "page_number"}
 VISUAL = {"image", "chart", "table", "formula", "header_image", "footer_image"}
