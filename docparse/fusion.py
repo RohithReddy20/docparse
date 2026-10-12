@@ -239,7 +239,13 @@ def detector_items(
         inside = [b for b in located if _inter(b["bbox"], d["bbox"]) / _area(b["bbox"]) >= 0.6 and b["label"] in TEXTUAL]
         # The detector has no list-item class and merges stacked short elements: when
         # several of our (finer) blocks sit inside one detector text box, emit ours.
-        if label in ("text", "list") and len(inside) >= 2 and sum(_area(b["bbox"]) for b in inside) >= 0.5 * _area(d["bbox"]):
+        # ParseBench localization fails only when a box exceeds ~5x an element it
+        # covers; splitting smaller merges costs more than it gains.
+        if (
+            label in ("text", "list") and len(inside) >= 2
+            and sum(_area(b["bbox"]) for b in inside) >= 0.5 * _area(d["bbox"])
+            and _area(d["bbox"]) >= 4.0 * min(_area(b["bbox"]) for b in inside)
+        ):
             for b in inside:
                 nb = dict(b)
                 nb["_key"] = (located.index(b), 0)
