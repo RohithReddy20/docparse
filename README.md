@@ -5,25 +5,52 @@ Goal: beat LlamaParse Cost Effective (80.6 overall @ 0.375¢/page) and approach
 Agentic (87.0 @ 1.25¢) using only permissively licensed open models, with cost
 measured from real GPU-seconds.
 
-## Why multi-step
+## Method: text layer + small VLM
 
-No single open model exceeds ~77 on ParseBench; the gaps are charts and semantic
-formatting, and most VLMs score 0 on visual grounding because they emit no
-bboxes. LlamaParse Agentic wins by orchestrating. Plan:
+No single open model exceeds ~77 on ParseBench, and they all share the same
+ceiling because they only look at pixels. 93% of ParseBench pages are born-digital
+(`scripts/analyze_text_layer.py`): the PDF text layer carries exact characters,
+bold/underline/strikethrough/highlight, font sizes (heading hierarchy), printed
+chart data labels, and the vector bars of 89% of chart pages. `docparse_hybrid_v0`
+uses the text layer for *content* and a 0.8B VLM for *structure*:
 
 ```
-page → triage (text layer?) → layout detection → per-region specialists
-     → verifier (cheap rule checks) → escalation on low confidence → assemble
+PDF page ─┬─ text layer (PyMuPDF, CPU)  : spans + styling + drawings
+          └─ LightOnOCR-3-0.8B grounding: block order, labels, bboxes, table/chart HTML
+                     │
+          reconcile  (docparse/hybrid.py)
+            • each VLM text block re-rendered from the text-layer lines it covers
+              (styling markers, heading levels from font size, exact digits)
+            • merged blocks split on paragraph gaps / list items / bold lead lines
+            • lines the VLM skipped recovered as blocks; header/footer/page-number
+              lifted into structured fields
+            • scanned pages (raster covers the page) keep the VLM output whole
+          charts     (docparse/charts/)
+            • VLM table snapped to printed data labels (textlabels.snap_table)
+            • extra candidate tables from text labels and from vector bars/lines
+              scaled by axis ticks (vector.reconstruct_page)
 ```
+
+Scores on the ParseBench test split (12 PDFs), identical VLM output for both rows:
+
+| | table | chart | content | formatting | layout | overall |
+|---|---|---|---|---|---|---|
+| LightOnOCR-3-0.8B alone | 76.8 | 46.7 | 90.5 | 28.7 | 67.9 | 62.1 |
+| docparse_hybrid_v0 | 76.8 | 66.7 | 90.9 | 61.5 | 74.2 | 74.0 |
+
+Everything above the first row costs CPU only. Iterate without GPU:
+`scripts/reuse_raw.sh lightonocr3_0_8b_grounding docparse_hybrid_v0` re-normalizes
+saved VLM outputs under the hybrid pipeline and re-evaluates;
+`scripts/chart_eval.py <module:function>` scores a chart reconstruction against the
+chart rules on all 568 chart pages.
 
 ## Components (all Apache/MIT)
 
 | Role | Model | ParseBench (single) |
 |---|---|---|
-| Text + grounding | LightOnOCR-3-0.8B | 74.6 |
-| Tables / JSON layout | Infinity-Parser2-Flash (2B) | 73.3 |
-| Layout detector | PP-DocLayout-V3 | — |
-| Charts (escalation) | LightOnOCR-3-4B → Qwen3.8-27B | 66 / 69 |
+| Structure + grounding | LightOnOCR-3-0.8B | 74.6 |
+| Tables / JSON layout (optional) | Infinity-Parser2-Flash (2B) | 73.3 |
+| Layout detector (optional) | PP-DocLayout-V3 | — |
 
 Avoided: MinerU, KDL/florin/rakedoc-nano (AGPL), Chandra (non-compete license).
 
