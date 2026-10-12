@@ -93,8 +93,47 @@ def _heading_level(lines: list[Line], tl: TextLayerPage) -> int:
     return min(6, 1 + len(page_sizes))
 
 
-def render_block(block: dict[str, Any], tl: TextLayerPage) -> str | None:
-    """Text-layer rendering of a VLM block, or None to keep the VLM text."""
+def _paragraphs(lines: list[Line]) -> list[list[Line]]:
+    """Split consecutive lines on vertical gaps clearly larger than the running
+    line pitch (a blank line between paragraphs); single lines are their own group."""
+    if len(lines) < 2:
+        return [lines]
+    heights = sorted(ln.bbox[3] - ln.bbox[1] for ln in lines)
+    line_h = heights[len(heights) // 2]
+    gaps = [max(0.0, b.bbox[1] - a.bbox[3]) for a, b in zip(lines, lines[1:])]
+    nonzero = sorted(g for g in gaps if g > 0.5)
+    base_gap = nonzero[len(nonzero) // 2] if nonzero else 0.0
+    groups: list[list[Line]] = [[lines[0]]]
+    for gap, ln in zip(gaps, lines[1:]):
+        is_break = gap > 0.45 * line_h and (base_gap == 0.0 or gap > 1.7 * base_gap)
+        if is_break:
+            groups.append([ln])
+        else:
+            groups[-1].append(ln)
+    return groups
+
+
+def _lines_bbox1000(lines: list[Line], tl: TextLayerPage) -> list[float]:
+    x0 = min(ln.bbox[0] for ln in lines)
+    y0 = min(ln.bbox[1] for ln in lines)
+    x1 = max(ln.bbox[2] for ln in lines)
+    y1 = max(ln.bbox[3] for ln in lines)
+    return [x0 / tl.width * 1000, y0 / tl.height * 1000, x1 / tl.width * 1000, y1 / tl.height * 1000]
+
+
+def _render_group(label: str, lines: list[Line], tl: TextLayerPage) -> str:
+    rendered = [r for r in (render_line(ln) for ln in lines) if r]
+    if label == "title":
+        # One heading per text-layer line: a title block often stacks several
+        # headings (company / programme / section), each scored separately.
+        level = _heading_level(lines, tl)
+        return "\n\n".join(f"{'#' * level} {_strip_outer_bold(r)}" for r in rendered)
+    return " ".join(rendered) if label != "list" else "\n".join(rendered)
+
+
+def render_blocks(block: dict[str, Any], tl: TextLayerPage) -> list[dict[str, Any]] | None:
+    """Text-layer rendering of a VLM block as one or more blocks (split on paragraph
+    gaps, bboxes tightened to the text), or None to keep the VLM block."""
     if block["label"] not in TEXT_LABELS or block.get("bbox") is None:
         return None
     lines = _lines_in_bbox(tl, block["bbox"])
@@ -103,16 +142,58 @@ def render_block(block: dict[str, Any], tl: TextLayerPage) -> str | None:
     layer_text = " ".join(ln.text for ln in lines)
     if fuzz.token_set_ratio(_norm(layer_text), _norm(block["text"])) < MIN_SIMILARITY:
         return None
-    rendered = [render_line(ln) for ln in lines]
-    rendered = [r for r in rendered if r]
-    if not rendered:
-        return None
-    if block["label"] == "title":
-        # One heading per text-layer line: a title block often stacks several
-        # headings (company / programme / section), each scored separately.
-        level = _heading_level(lines, tl)
-        return "\n\n".join(f"{'#' * level} {_strip_outer_bold(r)}" for r in rendered)
-    return " ".join(rendered) if block["label"] != "list" else "\n".join(rendered)
+    groups = _paragraphs(lines) if block["label"] in ("text", "list", "footnote") else [lines]
+    out: list[dict[str, Any]] = []
+    for g in groups:
+        for label, sub in _split_items_and_headings(block["label"], g, tl):
+            text = _render_group(label, sub, tl)
+            if not text:
+                continue
+            nb = dict(block)
+            nb.update(label=label, text=text, bbox=_lines_bbox1000(sub, tl), source="textlayer")
+            out.append(nb)
+    return out or None
+
+
+_LIST_MARKER_RE = re.compile(r"^\s*(?:[\u2022\u25aa\u25cf\u2013\u2014\-\*\u25a0\u2023\u2043\u25e6]|\(?\d{1,3}[.)]|\(?[a-zA-Z][.)]|[ivxIVX]{1,5}[.)])\s+")
+
+
+def _is_heading_line(ln: Line, tl: TextLayerPage) -> bool:
+    spans = [s for s in ln.spans if s.text.strip()]
+    if not spans or len(ln.text.strip()) > 120:
+        return False
+    all_bold = all(s.bold for s in spans)
+    bigger = all(s.size >= tl.body_size + 0.9 for s in spans)
+    return all_bold or bigger
+
+
+def _split_items_and_headings(label: str, lines: list[Line], tl: TextLayerPage) -> list[tuple[str, list[Line]]]:
+    """ParseBench treats each list item and each bold/larger lead line as its own
+    element; VLM blocks routinely merge them."""
+    if label not in ("text", "list") or len(lines) < 2:
+        return [(label, lines)]
+    n_markers = sum(bool(_LIST_MARKER_RE.match(ln.text)) for ln in lines)
+    out: list[tuple[str, list[Line]]] = []
+    cur: list[Line] = []
+    for i, ln in enumerate(lines):
+        starts_item = n_markers >= 2 and _LIST_MARKER_RE.match(ln.text) is not None
+        heading = i == 0 and len(lines) >= 2 and _is_heading_line(ln, tl) and not _is_heading_line(lines[1], tl)
+        if heading:
+            out.append(("section_header", [ln]))
+            continue
+        if starts_item and cur:
+            out.append(("list" if label == "list" else "text", cur))
+            cur = []
+        cur.append(ln)
+    if cur:
+        out.append(("list" if label == "list" else "text", cur))
+    return out
+
+
+def render_block(block: dict[str, Any], tl: TextLayerPage) -> str | None:
+    """Text-layer rendering of a VLM block's text, or None to keep the VLM text."""
+    blocks = render_blocks(block, tl)
+    return "\n\n".join(b["text"] for b in blocks) if blocks else None
 
 
 def _strip_outer_bold(text: str) -> str:
@@ -127,22 +208,30 @@ def reconcile_page(blocks: list[dict[str, Any]], tl: TextLayerPage | None) -> li
     out: list[dict[str, Any]] = []
     covered: set[int] = set()
     for b in blocks:
-        nb = dict(b)
-        r = render_block(b, tl)
-        if r is not None:
-            nb["text"] = r
-            nb["source"] = "textlayer"
+        rendered = render_blocks(b, tl)
         if b.get("bbox") is not None:
             covered.update(id(ln) for ln in _lines_in_bbox(tl, b["bbox"]))
-        out.append(nb)
+        out.extend(rendered if rendered is not None else [dict(b)])
     return _insert_orphans(out, tl, covered)
+
+
+def _orphan_label(ln: Line, tl: TextLayerPage) -> str:
+    cy = (ln.bbox[1] + ln.bbox[3]) / 2
+    text = ln.text.strip()
+    if re.fullmatch(r"[-–—\s]*(page\s*)?\d{1,4}([\s/]+(of\s+)?\d{1,4})?[-–—\s]*", text, flags=re.I):
+        return "page_number"
+    if cy < 0.07 * tl.height:
+        return "header"
+    if cy > 0.93 * tl.height:
+        return "footer"
+    return "text"
 
 
 def _insert_orphans(blocks: list[dict[str, Any]], tl: TextLayerPage, covered: set[int]) -> list[dict[str, Any]]:
     """Text-layer lines outside every VLM bbox are real page text the VLM skipped
     (bullets, marginal marks, stray headings). Add them as text blocks, placed by
     vertical position among the located blocks."""
-    orphans = [ln for ln in tl.lines if id(ln) not in covered and len(ln.text.strip()) >= 2]
+    orphans = [ln for ln in tl.lines if id(ln) not in covered and (len(ln.text.strip()) >= 2 or ln.text.strip().isdigit())]
     if not orphans:
         return blocks
     located = [(b["bbox"][1] / 1000 * tl.height, i) for i, b in enumerate(blocks) if b.get("bbox") is not None]
@@ -154,7 +243,7 @@ def _insert_orphans(blocks: list[dict[str, Any]], tl: TextLayerPage, covered: se
             ln.bbox[0] / tl.width * 1000, ln.bbox[1] / tl.height * 1000,
             ln.bbox[2] / tl.width * 1000, ln.bbox[3] / tl.height * 1000,
         ]
-        inserts.append((pos, {"label": "text", "continuation": False, "bbox": bbox, "text": render_line(ln), "source": "orphan"}))
+        inserts.append((pos, {"label": _orphan_label(ln, tl), "continuation": False, "bbox": bbox, "text": render_line(ln), "source": "orphan"}))
     merged: list[dict[str, Any]] = []
     for i, b in enumerate(blocks):
         merged.extend(nb for pos, nb in inserts if pos == i)
