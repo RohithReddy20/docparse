@@ -165,6 +165,22 @@ def _emphasized(block: dict[str, Any], tl: TextLayerPage | None) -> bool:
     return bold or big
 
 
+def _heading_signature(bbox: list[float], tl: TextLayerPage | None) -> bool:
+    """Single line, <= 80 chars, every span bold or larger than body, no terminal period."""
+    if tl is None or not tl.has_text or tl.scanned:
+        return False
+    lines = _lines_in_bbox(tl, bbox)
+    if len(lines) != 1:
+        return False
+    text = lines[0].text.strip()
+    spans = [s for s in lines[0].spans if s.text.strip()]
+    if not spans or len(text) > 80 or text.endswith((".", ":", ";", ",")) or sum(c.isdigit() for c in text) > len(text) / 2:
+        return False
+    bold = all(s.bold for s in spans)
+    big = all(s.size >= tl.body_size + 0.9 for s in spans)
+    return bold or big
+
+
 def _relabel(block: dict[str, Any], det_label: str, tl: TextLayerPage | None) -> str:
     """Detector class vs VLM class. Headings are never demoted by the detector's
     generic `text`; promotion to a heading needs the text layer to agree; furniture
@@ -252,10 +268,13 @@ def detector_items(
                 items.append(nb)
             continue
         if label == "text":
-            # A VLM heading that the detector folded into generic text.
+            # A VLM heading that the detector folded into generic text, or a line
+            # with DocLayNet's heading signature (own short line, bold / larger).
             heads = [b for b in inside if b["label"] in HEADING]
             if heads and len(inside) == 1 and len(re.sub(r"\s+", " ", heads[0]["text"])) <= 120:
                 label = heads[0]["label"]
+            elif len(inside) <= 1 and _heading_signature(d["bbox"], tl):
+                label = "section_header"
         text = ""
         if tl is not None and tl.has_text and not tl.scanned and label in TEXTUAL:
             text = " ".join(ln.text.strip() for ln in _lines_in_bbox(tl, d["bbox"]))
