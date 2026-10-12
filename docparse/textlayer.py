@@ -46,6 +46,7 @@ class TextLayerPage:
     height: float
     lines: list[Line] = field(default_factory=list)
     body_size: float = 0.0  # most common font size on the page
+    scanned: bool = False  # a raster image covers most of the page: the text layer is OCR output, not source text
 
     @property
     def has_text(self) -> bool:
@@ -118,6 +119,19 @@ def _apply_annots(lines: list[Line], page: pymupdf.Page) -> None:
                         setattr(s, kind, True)
 
 
+def _is_scanned(page: pymupdf.Page) -> bool:
+    """True when one raster image covers >= 60% of the page (a scan with an OCR layer)."""
+    area = page.rect.width * page.rect.height
+    for img in page.get_images(full=True):
+        try:
+            rects = page.get_image_rects(img[0])
+        except Exception:  # noqa: BLE001
+            continue
+        if any(r.width * r.height >= 0.6 * area for r in rects):
+            return True
+    return False
+
+
 def extract_page(page: pymupdf.Page) -> TextLayerPage:
     d = page.get_text("dict")
     out = TextLayerPage(width=page.rect.width, height=page.rect.height)
@@ -143,6 +157,7 @@ def extract_page(page: pymupdf.Page) -> TextLayerPage:
                 out.lines.append(Line(spans=spans, bbox=list(raw_line["bbox"])))
     if sizes:
         out.body_size = max(sizes.items(), key=lambda kv: kv[1])[0]
+    out.scanned = _is_scanned(page)
     _apply_drawings(out.lines, page)
     _apply_annots(out.lines, page)
     return out
