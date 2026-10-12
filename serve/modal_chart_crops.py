@@ -40,7 +40,7 @@ MAX_NEW_TOKENS = 2048  # card example uses 512; dense chart tables need more
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
-    .pip_install("torch==2.8.0", "transformers>=5.0.0", "pillow", "pymupdf>=1.24", "huggingface_hub", "accelerate")
+    .pip_install("torch==2.8.0", "transformers>=5.0.0", "pillow", "pymupdf>=1.24", "huggingface_hub", "accelerate", "requests")
     .env({"HF_HOME": "/vol/hf", "PYTHONUNBUFFERED": "1"})
     .add_local_python_source("docparse")
 )
@@ -192,6 +192,118 @@ def pack() -> str:
     return f"{tgz.relative_to(VOL_PATH)} {tgz.stat().st_size / 1e6:.1f}MB"
 
 
+
+
+@app.function(image=image, volumes={VOL_PATH: vol}, cpu=4, memory=8192, timeout=3 * 3600)
+def dump_remote(endpoint: str, groups: str = "chart", limit: int = 0, concurrency: int = 12, max_tokens: int = 2048) -> str:
+    """Same crops, sent to a vLLM OpenAI-compatible server (serve/modal_vllm.py with
+    DOCPARSE_MODEL=PaddlePaddle/PaddleOCR-VL-1.6): batched decoding is far faster
+    than per-crop HF generate."""
+    import base64
+    import io
+    import threading
+    import time as _time
+    from concurrent.futures import ThreadPoolExecutor
+
+    import pymupdf
+    import requests
+    from PIL import Image
+
+    url = endpoint.rstrip("/")
+    if not url.endswith("/v1"):
+        url += "/v1"
+    for _ in range(90):
+        try:
+            if requests.get(url + "/models", timeout=20).ok:
+                break
+        except Exception:  # noqa: BLE001
+            pass
+        _time.sleep(10)
+    served = requests.get(url + "/models", timeout=20).json()["data"][0]["id"]
+
+    def recognize(img: Image.Image) -> str:
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        b64 = base64.b64encode(buf.getvalue()).decode()
+        r = requests.post(url + "/chat/completions", json={
+            "model": served,
+            "messages": [{"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                {"type": "text", "text": PROMPT},
+            ]}],
+            "max_tokens": max_tokens, "temperature": 0,
+        }, timeout=600)
+        r.raise_for_status()
+        return (r.json()["choices"][0]["message"]["content"] or "").strip()
+
+    stop = threading.Event()
+
+    def committer() -> None:
+        while not stop.wait(120):
+            vol.commit()
+
+    threading.Thread(target=committer, daemon=True).start()
+    pool = ThreadPoolExecutor(max_workers=concurrency)
+    done = failed = n_charts = 0
+    for group in groups.split(","):
+        raws = sorted(Path(RAW_DIR, group).glob("*.raw.json"))
+        if limit:
+            raws = raws[:limit]
+        Path(OUT_DIR, group).mkdir(parents=True, exist_ok=True)
+        for raw_path in raws:
+            name = raw_path.name[: -len(".raw.json")]
+            target = Path(OUT_DIR, group, name + ".json")
+            if target.exists():
+                done += 1
+                continue
+            try:
+                raw = json.loads(raw_path.read_text())["raw_output"]
+                page_results = raw.get("page_results", raw.get("pages", []))
+                doc = pymupdf.open(Path(BENCH_DIR, "data", "docs", group, name + ".pdf"))
+                jobs = []
+                pages = []
+                for p_ in page_results:
+                    idx = p_["page_index"]
+                    pages.append({"charts": []})
+                    boxes = chart_blocks(p_["raw_text"])
+                    if not boxes or idx >= len(doc):
+                        continue
+                    pix = doc[idx].get_pixmap(matrix=pymupdf.Matrix(DPI / 72, DPI / 72), alpha=False)
+                    full = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+                    W, H = full.size
+                    for bb in boxes:
+                        x0, y0, x1, y1 = (bb[0] / 1000 * W, bb[1] / 1000 * H, bb[2] / 1000 * W, bb[3] / 1000 * H)
+                        pw, ph = PAD * (x1 - x0), PAD * (y1 - y0)
+                        crop = full.crop((max(0, int(x0 - pw)), max(0, int(y0 - ph)), min(W, int(x1 + pw)), min(H, int(y1 + ph))))
+                        if crop.width < 16 or crop.height < 16:
+                            continue
+                        jobs.append((len(pages) - 1, bb, _time.time(), pool.submit(recognize, crop)))
+                doc.close()
+                for pos, bb, t0, fut in jobs:
+                    try:
+                        text = fut.result()
+                    except Exception as e:  # noqa: BLE001
+                        text = ""
+                        print(f"crop failed {name}: {e}", flush=True)
+                    pages[pos]["charts"].append({"bbox": bb, "text": text, "ms": int((_time.time() - t0) * 1000)})
+                    n_charts += 1
+                target.write_text(json.dumps({"model": MODEL, "prompt": PROMPT, "dpi": DPI, "pad": PAD, "pages": pages}))
+                done += 1
+            except Exception as e:  # noqa: BLE001
+                failed += 1
+                print(f"FAILED {name}: {e}", flush=True)
+            if (done + failed) % 50 == 0:
+                print(f"progress {done} done, {failed} failed, {n_charts} charts", flush=True)
+    stop.set()
+    vol.commit()
+    return f"done={done} failed={failed} charts={n_charts}"
+
+
 @app.local_entrypoint()
-def main(mode: str = "dump", groups: str = "chart", limit: int = 0):
-    print(dump.remote(groups, limit) if mode == "dump" else pack.remote())
+def main(mode: str = "dump", groups: str = "chart", limit: int = 0, endpoint: str = "", concurrency: int = 12):
+    if mode == "dump":
+        print(dump.remote(groups, limit))
+    elif mode == "remote":
+        print(dump_remote.remote(endpoint, groups, limit, concurrency))
+    else:
+        print(pack.remote())
