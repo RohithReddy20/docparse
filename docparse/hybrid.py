@@ -65,10 +65,11 @@ def merge_rows(lines: list[Line]) -> list[Line]:
         if rows:
             prev = rows[-1]
             h = min(prev.bbox[3] - prev.bbox[1], ln.bbox[3] - ln.bbox[1]) or 1.0
-            if abs((prev.bbox[1] + prev.bbox[3]) / 2 - (ln.bbox[1] + ln.bbox[3]) / 2) <= 0.5 * h:
-                # Keep left-to-right order whichever line came first.
-                left, right = (prev, ln) if prev.bbox[0] <= ln.bbox[0] else (ln, prev)
-                gap = right.bbox[0] - left.bbox[2]
+            left, right = (prev, ln) if prev.bbox[0] <= ln.bbox[0] else (ln, prev)
+            gap = right.bbox[0] - left.bbox[2]
+            same_row = abs((prev.bbox[1] + prev.bbox[3]) / 2 - (ln.bbox[1] + ln.bbox[3]) / 2) <= 0.5 * h
+            # Far-apart pieces on one row are separate elements (KPI tiles, columns).
+            if same_row and gap <= 2.5 * h:
                 spans = list(left.spans)
                 if gap > 0.25 * h and spans and not spans[-1].text.endswith(" "):
                     spans[-1] = Span(**{**spans[-1].__dict__, "text": spans[-1].text + " "})
@@ -259,6 +260,44 @@ def _wrap_vlm(seg: str, style: Span, skip_bold: bool = False) -> str:
     return f"{lead}{inner}{trail}"
 
 
+_VLM_BULLET_RE = re.compile(r"^\s*(?:[-*\u2022\u25aa\u25cf\u2013]|\d{1,3}[.)]|[a-zA-Z][.)])\s+\S", re.M)
+
+
+def _vlm_list_items(vlm: str) -> list[str] | None:
+    """Lines of a VLM block that are markdown list items (each is its own element)."""
+    lines = [ln for ln in vlm.splitlines() if ln.strip()]
+    if len(lines) < 2 or sum(bool(_VLM_BULLET_RE.match(ln)) for ln in lines) < max(2, int(0.8 * len(lines))):
+        return None
+    items: list[str] = []
+    for ln in lines:
+        if _VLM_BULLET_RE.match(ln) or not items:
+            items.append(ln.strip())
+        else:
+            items[-1] += " " + ln.strip()  # wrapped continuation
+    return items
+
+
+def _split_vlm_items(block: dict[str, Any], items: list[str], lines: list[Line], tl: TextLayerPage) -> list[dict[str, Any]]:
+    """One block per list item; bbox from the layer lines that match the item text."""
+    out: list[dict[str, Any]] = []
+    pool = list(lines)
+    for item in items:
+        body = re.sub(r"^\s*(?:[-*\u2022\u25aa\u25cf\u2013]|\d{1,3}[.)]|[a-zA-Z][.)])\s+", "", item)
+        matched: list[Line] = []
+        for ln in pool:
+            t = ln.text.strip()
+            if len(t) >= 3 and fuzz.partial_ratio(t, body) >= 85:
+                matched.append(ln)
+        for ln in matched:
+            pool.remove(ln)
+        nb = dict(block)
+        nb.update(text=transfer_styles(item, matched) if matched else item, source="vlm-item")
+        if matched:
+            nb["bbox"] = _lines_bbox1000(matched, tl)
+        out.append(nb)
+    return out
+
+
 def _align_slice(text: str, query: str, lo: int) -> tuple[int, int] | None:
     """Locate ``query`` (a layer group's text) inside ``text`` at or after ``lo``."""
     q = re.sub(r"\s+", " ", query).strip()
@@ -315,6 +354,9 @@ def render_blocks(
                 out.append(nb)
         return out or None
 
+    items = _vlm_list_items(vlm)
+    if items and len(items) >= 2:
+        return _split_vlm_items(block, items, lines, tl)
     groups = _paragraphs(lines) if block["label"] in ("text", "list", "footnote") else [lines]
     parts: list[tuple[str, list[Line]]] = []
     for g in groups:
