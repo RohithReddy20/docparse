@@ -17,7 +17,7 @@ import pymupdf
 
 from docparse import textlayer
 from docparse.charts.integrate import enhance_chart_blocks
-from docparse.fusion import fuse, load_detections
+from docparse.fusion import detector_items, fuse, load_detections
 from docparse.hybrid import reconcile_page
 from docparse.providers.lightonocr3 import (
     _LABEL_TO_CANONICAL_KEY,
@@ -84,9 +84,15 @@ class DocparseHybridProvider(LightOnOCR3Provider):
                 except Exception as e:  # noqa: BLE001
                     logger.warning("chart enhancement failed on page %d: %s", idx, e)
             md = blocks_to_markdown(blocks)
+            element_blocks = blocks
+            if dets and idx < len(dets.get("pages", [])):
+                try:
+                    element_blocks = detector_items(blocks, dets["pages"][idx], tl)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("detector items failed on page %d: %s", idx, e)
             items = [
                 {"bbox": b["bbox"], "label": _LABEL_TO_CANONICAL_KEY.get(b["label"], "text"), "text": b["text"]}
-                for b in blocks
+                for b in element_blocks
                 if b["bbox"] is not None
             ]
             lp = build_layout_page(items, p["width"], p["height"], md, idx + 1)

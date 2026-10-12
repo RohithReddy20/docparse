@@ -112,7 +112,7 @@ def fuse(blocks: list[dict[str, Any]], page_dets: dict[str, Any], tl: TextLayerP
             frac_d = _inter(b["bbox"], d["bbox"]) / _area(d["bbox"])
             if d["label"] in VISUAL and b["label"] in ("image", "chart", "table", "formula", "header_image", "footer_image"):
                 b["bbox"] = list(d["bbox"])
-                if d["label"] != "table" and b["label"] != "chart":
+                if d["label"] != "table" and b["label"] not in ("chart", "table"):
                     b["label"] = d["label"]
                 used_dets.add(j)
             elif d["label"] in TEXTUAL and b["label"] in TEXTUAL and frac_d >= 0.3:
@@ -218,3 +218,38 @@ def _split_by_dets(block: dict[str, Any], dets: list[dict[str, Any]], tl: TextLa
         nb.update(label=d["label"], bbox=list(d["bbox"]), text=_retitle(transfer_styles(seg, lines), d["label"]) if d["label"] in ("title", "section_header") else transfer_styles(seg, lines), source="fused-split")
         out.append(nb)
     return out
+
+
+def detector_items(
+    blocks: list[dict[str, Any]], page_dets: dict[str, Any], tl: TextLayerPage | None
+) -> list[dict[str, Any]]:
+    """Layout elements for the grounding metric, detector-primary: one item per
+    detector box (class from the detector, heading class only if the text layer or
+    the VLM agree), text attributed from the text-layer lines inside the box (or the
+    overlapping VLM block). Our blocks are added only where the detector has nothing
+    (lists, elements below its confidence). The page markdown is not touched."""
+    dets = _det_boxes(page_dets)
+    items: list[dict[str, Any]] = []
+    located = [b for b in blocks if b.get("bbox") is not None]
+    for d in dets:
+        label = d["label"]
+        over = [b for b in located if _inter(b["bbox"], d["bbox"]) / _area(d["bbox"]) >= 0.3]
+        if label in HEADING:
+            agree = any(b["label"] in HEADING for b in over) or _emphasized({"bbox": d["bbox"]}, tl)
+            if not agree:
+                label = "text"
+        text = ""
+        if tl is not None and tl.has_text and not tl.scanned and label in TEXTUAL:
+            text = " ".join(ln.text.strip() for ln in _lines_in_bbox(tl, d["bbox"]))
+        if not text and over:
+            best = max(over, key=lambda b: _inter(b["bbox"], d["bbox"]))
+            text = re.sub(r"<[^>]+>", " ", best["text"]) if best["label"] in ("table", "chart") else best["text"]
+        items.append({"label": label, "bbox": list(d["bbox"]), "text": text, "source": "detector"})
+    # our blocks the detector missed
+    for b in located:
+        if not b["text"] and b["label"] in TEXTUAL:
+            continue
+        if any(_inter(b["bbox"], d["bbox"]) / _area(b["bbox"]) >= 0.5 for d in dets):
+            continue
+        items.append(b)
+    return items
