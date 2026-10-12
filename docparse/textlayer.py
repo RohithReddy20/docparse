@@ -28,6 +28,7 @@ class Span:
     underline: bool = False
     strike: bool = False
     mark: bool = False
+    sup: bool = False
 
 
 @dataclass
@@ -149,6 +150,7 @@ def extract_page(page: pymupdf.Page) -> TextLayerPage:
                     size=round(rs["size"], 1),
                     bold=bool(rs["flags"] & _BOLD_FLAG) or "bold" in font or "black" in font or "heavy" in font,
                     italic=bool(rs["flags"] & 2) or "italic" in font or "oblique" in font,
+                    sup=bool(rs["flags"] & 1),
                 )
                 spans.append(s)
                 if s.text.strip():

@@ -88,12 +88,16 @@ def _inner(text: str, s: Span) -> str:
     core = text.strip()
     if not core:
         return text
+    if s.sup:
+        core = f"<sup>{core}</sup>"
     if s.mark:
         core = f"<mark>{core}</mark>"
     if s.strike:
         core = f"~~{core}~~"
     if s.underline:
         core = f"<u>{core}</u>"
+    if s.italic and not s.bold:
+        core = f"*{core}*"
     return f"{lead}{core}{trail}"
 
 
@@ -176,6 +180,75 @@ def _render_group(label: str, lines: list[Line], tl: TextLayerPage) -> str:
     return " ".join(rendered) if label != "list" else "\n".join(rendered)
 
 
+_GARBAGE_RE = re.compile(r"[\u00a4\ufffd\ue000-\uf8ff\x00-\x08\x0b\x0c\x0e-\x1f]")
+IDENTICAL = 97  # char-level ratio above which layer text replaces VLM text outright
+
+
+def _styled_runs(lines: list[Line]) -> list[tuple[str, Span]]:
+    """Maximal runs of consecutive spans sharing a non-default style, as (text, style)."""
+    runs: list[tuple[str, Span]] = []
+    for ln in lines:
+        cur: list[str] = []
+        key: tuple | None = None
+        proto: Span | None = None
+        for sp in ln.spans:
+            k = (sp.bold, sp.italic, sp.underline, sp.strike, sp.mark, sp.sup)
+            if key is not None and k == key:
+                cur.append(sp.text)
+                continue
+            if cur and any(key):
+                runs.append(("".join(cur), proto))
+            cur, key, proto = [sp.text], k, sp
+        if cur and key is not None and any(key):
+            runs.append(("".join(cur), proto))
+    return runs
+
+
+def transfer_styles(vlm_text: str, lines: list[Line]) -> str:
+    """Wrap the VLM's characters with the text layer's styling: each styled run is
+    located in ``vlm_text`` by fuzzy alignment and wrapped in place. Characters stay
+    the VLM's (symbol fonts and clipped layers make the layer's unreliable)."""
+    runs = _styled_runs(lines)
+    if not runs:
+        return vlm_text
+    edits: list[tuple[int, int, Span]] = []
+    taken: list[tuple[int, int]] = []
+    for text, style in runs:
+        q = re.sub(r"\s+", " ", text).strip()
+        if len(q) < 2:
+            continue
+        al = fuzz.partial_ratio_alignment(q, vlm_text)
+        if al is None or al.score < (85 if len(q) >= 10 else 75):
+            continue
+        a, b = al.dest_start, al.dest_end
+        # snap to word boundaries
+        while a > 0 and vlm_text[a - 1].isalnum() and vlm_text[a].isalnum():
+            a -= 1
+        while b < len(vlm_text) and vlm_text[b - 1].isalnum() and vlm_text[b].isalnum():
+            b += 1
+        if any(not (b <= x0 or a >= x1) for x0, x1 in taken):
+            continue
+        taken.append((a, b))
+        edits.append((a, b, style))
+    for a, b, style in sorted(edits, reverse=True):
+        seg = vlm_text[a:b]
+        if seg.strip():
+            vlm_text = vlm_text[:a] + _wrap_vlm(seg, style) + vlm_text[b:]
+    return vlm_text
+
+
+def _wrap_vlm(seg: str, style: Span) -> str:
+    lead = re.match(r"^\s*", seg).group(0)
+    trail = re.search(r"\s*$", seg).group(0)
+    core = seg.strip()
+    already_bold = core.startswith("**") and core.endswith("**")
+    inner = _inner(core, Span(text=core, bbox=style.bbox, size=style.size, italic=style.italic and not style.bold,
+                               underline=style.underline, strike=style.strike, mark=style.mark, sup=style.sup))
+    if style.bold and not already_bold:
+        inner = f"**{inner}**"
+    return f"{lead}{inner}{trail}"
+
+
 def render_blocks(
     block: dict[str, Any], tl: TextLayerPage, claimed: set[int] | None = None
 ) -> list[dict[str, Any]] | None:
@@ -187,12 +260,19 @@ def render_blocks(
     if not lines:
         return None
     layer_text = " ".join(ln.text for ln in lines)
-    if fuzz.token_set_ratio(_norm(layer_text), _norm(block["text"])) < MIN_SIMILARITY:
-        return None
-    if len(_norm(layer_text)) < 0.85 * len(_norm(block["text"])):
-        # Clipped or partial text layer (truncated URLs, lines outside the box):
-        # the VLM read more of it than the layer holds.
-        return None
+    unreliable = bool(_GARBAGE_RE.search(layer_text))
+    identical = (
+        not unreliable
+        and fuzz.ratio(_norm(layer_text), _norm(block["text"])) >= IDENTICAL
+        and len(_norm(layer_text)) >= 0.85 * len(_norm(block["text"]))
+    )
+    if not identical:
+        # Keep the VLM's characters, borrow the layer's styling.
+        if block["label"] == "title":
+            return None
+        nb = dict(block)
+        nb.update(text=transfer_styles(block["text"], lines), source="styled-vlm")
+        return [nb]
     groups = _paragraphs(lines) if block["label"] in ("text", "list", "footnote") else [lines]
     out: list[dict[str, Any]] = []
     for g in groups:
@@ -209,13 +289,22 @@ def render_blocks(
 _LIST_MARKER_RE = re.compile(r"^\s*(?:[\u2022\u25aa\u25cf\u2013\u2014\-\*\u25a0\u2023\u2043\u25e6]|\(?\d{1,3}[.)]|\(?[a-zA-Z][.)]|[ivxIVX]{1,5}[.)])\s+")
 
 
+_CAPTION_RE = re.compile(r"^\s*(figure|fig\.|table|chart|exhibit|source|note|photo|image)\b", re.I)
+
+
 def _is_heading_line(ln: Line, tl: TextLayerPage) -> bool:
+    """A real section heading: larger than body text, or bold *and* short, not a
+    caption, list item or sentence. ParseBench labels bold lead-ins inside
+    paragraphs as Text, so bold alone is not enough."""
     spans = [s for s in ln.spans if s.text.strip()]
-    if not spans or len(ln.text.strip()) > 120:
+    text = ln.text.strip()
+    if not spans or len(text) > 80 or _LIST_MARKER_RE.match(text) or _CAPTION_RE.match(text):
         return False
-    all_bold = all(s.bold for s in spans)
     bigger = all(s.size >= tl.body_size + 0.9 for s in spans)
-    return all_bold or bigger
+    if bigger:
+        return True
+    all_bold = all(s.bold for s in spans)
+    return all_bold and len(text.split()) <= 8 and not text.endswith((".", ":", ";", ","))
 
 
 def _split_items_and_headings(label: str, lines: list[Line], tl: TextLayerPage) -> list[tuple[str, list[Line]]]:

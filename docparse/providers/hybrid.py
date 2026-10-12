@@ -7,6 +7,7 @@ differs.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from parse_bench.inference.providers.registry import register_provider
 from parse_bench.schemas.parse_output import PageIR, ParseLayoutPageIR, ParseOutput
@@ -29,20 +30,37 @@ from docparse.providers.lightonocr3 import (
 logger = logging.getLogger(__name__)
 
 
+def resolve_source(path: str) -> str:
+    """Raw results produced elsewhere (e.g. on Modal) carry that machine's paths;
+    map ``.../docs/<group>/<file>.pdf`` onto the local dataset copy."""
+    if Path(path).exists():
+        return path
+    marker = "docs/"
+    if marker in path:
+        rel = path[path.index(marker):]
+        for root in ("data", "data/test"):
+            cand = Path(root) / rel
+            if cand.exists():
+                return str(cand)
+    logger.warning("source PDF not found locally: %s", path)
+    return path
+
+
 @register_provider("docparse_hybrid")
 class DocparseHybridProvider(LightOnOCR3Provider):
     def normalize(self, raw_result: RawInferenceResult) -> InferenceResult:
         raw = dict(raw_result.raw_output)
         if "pages" in raw:
             raw["page_results"] = raw.pop("pages")
+        src = resolve_source(raw_result.request.source_file_path)
         try:
-            layers = textlayer.extract(raw_result.request.source_file_path)
+            layers = textlayer.extract(src)
         except Exception as e:  # noqa: BLE001
-            logger.warning("text layer extraction failed for %s: %s", raw_result.request.source_file_path, e)
+            logger.warning("text layer extraction failed for %s: %s", src, e)
             layers = []
 
         try:
-            doc = pymupdf.open(raw_result.request.source_file_path)
+            doc = pymupdf.open(src)
         except Exception:  # noqa: BLE001
             doc = None
 
