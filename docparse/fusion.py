@@ -50,6 +50,10 @@ DET_LABEL: dict[str, str] = {
     "Page-footer": "footer", "Page-header": "header", "Picture": "image", "Section-header": "section_header",
     "Table": "table", "Text": "text", "Title": "title", "Document Index": "text", "Code": "text",
     "Checkbox-Selected": "text", "Checkbox-Unselected": "text", "Form": "text", "Key-Value Region": "text",
+    # the same classes as emitted by the transformers checkpoint's id2label
+    "picture": "image", "section_header": "section_header", "page_header": "header", "page_footer": "footer",
+    "list_item": "list", "document_index": "text", "code": "text", "checkbox_selected": "text",
+    "checkbox_unselected": "text", "form": "text", "key_value_region": "text",
 }
 TEXTUAL = {"title", "section_header", "text", "aside_text", "list", "caption", "footnote", "header", "footer", "page_number"}
 VISUAL = {"image", "chart", "table", "formula", "header_image", "footer_image"}

@@ -7,6 +7,7 @@ differs.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 from parse_bench.inference.providers.registry import register_provider
@@ -19,6 +20,7 @@ from docparse import textlayer
 from docparse.charts.integrate import enhance_chart_blocks
 from docparse.fusion import detector_items, fuse, load_detections
 from docparse.hybrid import reconcile_page
+from docparse.tables import canonicalize_blocks
 from docparse.providers.lightonocr3 import (
     _LABEL_TO_CANONICAL_KEY,
     LightOnOCR3Provider,
@@ -83,6 +85,7 @@ class DocparseHybridProvider(LightOnOCR3Provider):
                     blocks = enhance_chart_blocks(blocks, doc[idx], tl)
                 except Exception as e:  # noqa: BLE001
                     logger.warning("chart enhancement failed on page %d: %s", idx, e)
+            blocks = canonicalize_blocks(blocks, tuple(os.getenv("DOCPARSE_TABLE_RULES", "")))
             md = blocks_to_markdown(blocks)
             element_blocks = blocks
             if dets and idx < len(dets.get("pages", [])):
