@@ -6,3 +6,6 @@ data/
 output/
 *.egg-info/
 .DS_Store
+output_heron/
+output_*/
+*.tgz
