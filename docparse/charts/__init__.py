@@ -24,7 +24,9 @@ import pymupdf
 
 from docparse.textlayer import Span, TextLayerPage
 
-NUMERIC_RE = re.compile(r"^[-−+]?\s*[$€£¥]?\s*\d[\d\s,.]*\s*%?$")
+# "1,200", "−17", "45%", "$1,200.5", "$600B", "(200)" (accounting negative), "5bn", "12.5x"
+_UNIT = r"(?:%|bn|mn|tn|b|m|k|t|x|pp|pts|p\.p\.)?"
+NUMERIC_RE = re.compile(r"^(?:\(\s*[$€£¥]?\s*\d[\d\s,.]*\s*" + _UNIT + r"\s*\)|[-−+]?\s*[$€£¥]?\s*\d[\d\s,.]*\s*" + _UNIT + r")$", re.I)
 
 
 @dataclass
@@ -81,7 +83,10 @@ def is_numeric(text: str) -> bool:
 def clean_number(text: str) -> str:
     """'14 000' -> '14000', '−17' -> '-17', '45%' -> '45', '$1,200.5' -> '1200.5'."""
     s = text.strip().replace("−", "-").replace("%", "")
+    if re.fullmatch(r"\(.*\)", s):
+        s = "-" + s[1:-1]  # accounting negative
     s = re.sub(r"[$€£¥\s]", "", s)
+    s = re.sub(r"(?<=\d)\s*(?:bn|mn|tn|b|m|k|t|x|pp|pts|p\.p\.)$", "", s, flags=re.I)
     if s.count(",") and s.count(".") == 0 and re.search(r",\d{1,2}$", s):
         s = s.replace(",", ".")  # decimal comma
     return s.replace(",", "")

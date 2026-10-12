@@ -510,27 +510,60 @@ def detect_axes(spans: list[Span]) -> list[Axis]:
     for orient, keyfns in keyings.items():
         for keyfn in keyfns:
             groups: dict[int, list[tuple[Span, float]]] = defaultdict(list)
-            for s, v in nums:
-                groups[round(keyfn(s) / ALIGN_TOL)].append((s, v))
+            # 1-D gap clustering on the alignment key (rounding splits a column
+            # whose key straddles a bucket boundary)
+            last_key = None
+            gid = -1
+            for s, v in sorted(nums, key=lambda m: keyfn(m[0])):
+                k = keyfn(s)
+                if last_key is None or k - last_key > ALIGN_TOL:
+                    gid += 1
+                last_key = k
+                groups[gid].append((s, v))
             for key, members in groups.items():
                 if len(members) < 3:
                     continue
+                key = sum(keyfn(m[0]) for m in members) / len(members) / ALIGN_TOL
                 members.sort(key=lambda m: _span_center(m[0])[0 if orient == "x" else 1])
-                ids = tuple(sorted(id(m[0]) for m in members))
-                if ids in seen:
-                    continue
-                coords = [_span_center(m[0])[0 if orient == "x" else 1] for m in members]
-                values = [m[1] for m in members]
-                diffs = [b - a for a, b in zip(values, values[1:])]
-                if not (all(d > 0 for d in diffs) or all(d < 0 for d in diffs)):
-                    continue
-                a, b, r2 = _fit(coords, values)
-                if r2 < 0.995 or a == 0:
-                    continue
-                seen.add(ids)
-                step = min(abs(d) for d in diffs) or 1.0
-                axes.append(Axis(orient, a, b, step, coords, values, key * ALIGN_TOL, list(ids)))
+                # stacked panels share one tick column: split into monotone runs
+                for run in _monotone_runs(members):
+                    if len(run) < 3:
+                        continue
+                    ids = tuple(sorted(id(m[0]) for m in run))
+                    if ids in seen:
+                        continue
+                    coords = [_span_center(m[0])[0 if orient == "x" else 1] for m in run]
+                    values = [m[1] for m in run]
+                    diffs = [b - a for a, b in zip(values, values[1:])]
+                    a, b, r2 = _fit(coords, values)
+                    if r2 < 0.995 or a == 0:
+                        continue
+                    seen.add(ids)
+                    step = min(abs(d) for d in diffs) or 1.0
+                    axes.append(Axis(orient, a, b, step, coords, values, key * ALIGN_TOL, list(ids)))
     return axes
+
+
+def _monotone_runs(members: list[tuple[Span, float]]) -> list[list[tuple[Span, float]]]:
+    """Maximal strictly monotone runs (by value) of coordinate-sorted tick spans."""
+    runs: list[list[tuple[Span, float]]] = []
+    cur: list[tuple[Span, float]] = []
+    sign = 0
+    for m in members:
+        if cur:
+            d = m[1] - cur[-1][1]
+            s = (d > 0) - (d < 0)
+            if s == 0 or (sign and s != sign):
+                runs.append(cur)
+                cur, sign = [cur[-1]] if s != 0 else [], 0
+                if cur:
+                    sign = s
+            else:
+                sign = s
+        cur.append(m)
+    if cur:
+        runs.append(cur)
+    return runs
 
 
 def _round_value(v: float, step: float, fine: bool = False) -> str:
@@ -836,6 +869,33 @@ def _bar_value(bar: Bar, axis: Axis) -> float:
     return v1 - v0  # stacked segment
 
 
+def _horizontal(big: list[Bar], tol: float = 1.0) -> bool:
+    """Bar orientation from arrangement, not aspect: stacked segments of one bar
+    share both edges across the stacking axis; simple bars share a baseline."""
+    same_col = same_row = 0
+    for i, a in enumerate(big):
+        for b in big[i + 1 :]:
+            # touching segments of one stacked bar
+            if abs(a.x0 - b.x0) <= tol and abs(a.x1 - b.x1) <= tol and (abs(a.y1 - b.y0) <= tol or abs(b.y1 - a.y0) <= tol):
+                same_col += 1
+            if abs(a.y0 - b.y0) <= tol and abs(a.y1 - b.y1) <= tol and (abs(a.x1 - b.x0) <= tol or abs(b.x1 - a.x0) <= tol):
+                same_row += 1
+
+    def most_common(vals: list[float]) -> int:
+        vals = sorted(vals)
+        best = run = 1
+        for p, q in zip(vals, vals[1:]):
+            run = run + 1 if q - p <= tol else 1
+            best = max(best, run)
+        return best
+
+    v = same_col + max(most_common([b.y1 for b in big]), most_common([b.y0 for b in big]))
+    h = same_row + max(most_common([b.x0 for b in big]), most_common([b.x1 for b in big]))
+    if v != h:
+        return h > v
+    return sum(1 for b in big if b.w > b.h) >= len(big) / 2
+
+
 def _drop_containers(big: list[Bar]) -> list[Bar]:
     """Filled rects enclosing several bars are backgrounds, not bars."""
     out: list[Bar] = []
@@ -855,6 +915,7 @@ def reconstruct_region(
     polys: list[Poly] | None = None,
     page_legend: dict[Color, str] | None = None,
     panel: str | None = None,
+    page_axes: list[Axis] | None = None,
 ) -> list[ChartTable]:
     if bars is None or polys is None:
         return []
@@ -869,13 +930,20 @@ def reconstruct_region(
     tables: list[ChartTable] = []
 
     if big:
-        horizontal = sum(1 for b in big if b.w > b.h) >= len(big) / 2
+        horizontal = _horizontal(big)
         # bullets / tick marks are far thinner than the bars
         thick = sorted((b.h if horizontal else b.w) for b in big)[len(big) // 2]
         big = [b for b in big if (b.h if horizontal else b.w) >= 0.4 * thick] or big
         want = "x" if horizontal else "y"
         plot = [min(b.x0 for b in big), min(b.y0 for b in big), max(b.x1 for b in big), max(b.y1 for b in big)]
         cand = [a for a in axes if a.orient == want and _outside(a, plot)]
+        if not cand and page_axes:  # panels sharing one axis (small multiples)
+            lo, hi = (plot[0], plot[2]) if want == "x" else (plot[1], plot[3])
+            cand = [
+                a for a in page_axes
+                if a.orient == want and not _is_categorical(a.values, a.step) and _outside(a, plot)
+                and min(hi, max(a.coords)) - max(lo, min(a.coords)) >= 0.5 * (hi - lo)
+            ]
         axis = max(cand, key=lambda a: len(a.coords)) if cand else None
         zero = axis.coord(0.0) if axis is not None else _infer_zero(big, horizontal)
         labelled = sum(1 for b in big if _printed_label(b, want, spans, zero) is not None)
@@ -988,14 +1056,15 @@ def reconstruct_region(
             cats = _categories(spans, "y", plot, exclude)
             if cats:
                 series = [legend.get(p.color) or _end_label(p, spans) or f"Line {i + 1}" for i, p in enumerate(lines)]
+                per_series = [_side_axis(name, y_axes, plot) or axis for name in series]
                 rows_l: list[list[str]] = []
                 pre = f"{panel} – " if panel else ""
                 for cx, name in cats:
                     if cx < plot[0] - 10 or cx > plot[2] + 10:
                         continue
                     row = [pre + name]
-                    for p in lines:
-                        row.append(_round_value(axis.value(_sample(p.points, cx)), axis.step, fine=True))
+                    for p, ax in zip(lines, per_series):
+                        row.append(_round_value(ax.value(_sample(p.points, cx)), ax.step, fine=True))
                     rows_l.append(row)
                 if rows_l:
                     title = _chart_title(spans, plot) or ""
@@ -1045,6 +1114,23 @@ def _end_label(p: Poly, spans: list[Span]) -> str | None:
     return best[1] if best else None
 
 
+_RHS = re.compile(r"\b(rhs|rha|right(?:[- ]hand)?(?: axis| scale)?|r\.h\.s\.?)\b", re.I)
+_LHS = re.compile(r"\b(lhs|lha|left(?:[- ]hand)?(?: axis| scale)?|l\.h\.s\.?)\b", re.I)
+
+
+def _side_axis(name: str, y_axes: list[Axis], plot: list[float]) -> Axis | None:
+    """Dual-axis charts: a series tagged (RHS)/(LHS) reads off that side's axis."""
+    if len(y_axes) < 2:
+        return None
+    if _RHS.search(name):
+        right = [a for a in y_axes if a.pos >= plot[2] - 3]
+        return max(right, key=lambda a: len(a.coords)) if right else None
+    if _LHS.search(name):
+        left = [a for a in y_axes if a.pos <= plot[0] + 3]
+        return max(left, key=lambda a: len(a.coords)) if left else None
+    return None
+
+
 def _sample(points: list[tuple[float, float]], x: float) -> float:
     pts = sorted(points)
     if x <= pts[0][0]:
@@ -1067,6 +1153,7 @@ def reconstruct_page(page: pymupdf.Page, tl: TextLayerPage) -> list[ChartTable]:
         out.extend(pie_tables(slices, all_spans, page_legend, None))
     cores = _plot_cores(page, tl)
     multi = len(cores) >= 2
+    page_axes = detect_axes(all_spans) if multi else []
     for core, grown in cores:
         region = region_from_page(page, tl, grown, pad=0.0)
         others = [c for c, _g in cores if c is not core]
@@ -1088,5 +1175,5 @@ def reconstruct_page(page: pymupdf.Page, tl: TextLayerPage) -> list[ChartTable]:
         legend = dict(local)
         for c, n in page_legend.items():
             legend.setdefault(c, n)
-        out.extend(reconstruct_region(region, rb, rp, page_legend=legend, panel=panel))
+        out.extend(reconstruct_region(region, rb, rp, page_legend=legend, panel=panel, page_axes=page_axes))
     return out
