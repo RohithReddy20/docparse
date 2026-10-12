@@ -28,7 +28,7 @@ VOL_PATH = "/vol"
 BENCH_DIR = f"{VOL_PATH}/bench"
 DPI = 200
 
-image = modal.Image.debian_slim(python_version="3.12").pip_install("pymupdf>=1.24", "requests").env(ENV)
+image = modal.Image.debian_slim(python_version="3.12").pip_install("pymupdf>=1.24", "requests", "python-dotenv").env(ENV)
 vol = modal.Volume.from_name("docparse-output", create_if_missing=True)
 app = modal.App("docparse-layout-dump")
 

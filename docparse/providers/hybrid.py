@@ -17,6 +17,7 @@ import pymupdf
 
 from docparse import textlayer
 from docparse.charts.integrate import enhance_chart_blocks
+from docparse.fusion import fuse, load_detections
 from docparse.hybrid import reconcile_page
 from docparse.providers.lightonocr3 import (
     _LABEL_TO_CANONICAL_KEY,
@@ -64,6 +65,7 @@ class DocparseHybridProvider(LightOnOCR3Provider):
         except Exception:  # noqa: BLE001
             doc = None
 
+        dets = load_detections(src)
         pages: list[PageIR] = []
         layout_pages: list[ParseLayoutPageIR] = []
         for p in raw["page_results"]:
@@ -71,6 +73,11 @@ class DocparseHybridProvider(LightOnOCR3Provider):
             blocks = parse_grounding(p["raw_text"])
             tl = layers[idx] if idx < len(layers) else None
             blocks = reconcile_page(blocks, tl)
+            if dets and idx < len(dets.get("pages", [])):
+                try:
+                    blocks = fuse(blocks, dets["pages"][idx], tl)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("layout fusion failed on page %d: %s", idx, e)
             if tl is not None and doc is not None and idx < len(doc):
                 try:
                     blocks = enhance_chart_blocks(blocks, doc[idx], tl)
