@@ -66,11 +66,11 @@ chart rules on all 568 chart pages.
 
 Avoided: MinerU, KDL/florin/rakedoc-nano (AGPL), Chandra (non-compete license).
 
-## Budget rules
+## Compute
 
-Zero out-of-pocket. Modal free credit (~$20) is the hard cap and is used only for
-benchmark runs; iteration happens on Kaggle. `serve/modal_vllm.py` enforces one
-L4 container max, 2-minute idle scale-down, 1-hour hard timeout.
+Everything after the VLM pass is CPU-only. `serve/modal_vllm.py` runs the VLM on one
+L4 container (2-minute idle scale-down, 1-hour hard timeout); a full ParseBench run
+is about an L4-hour.
 
 ## Quickstart
 
