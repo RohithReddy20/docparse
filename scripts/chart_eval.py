@@ -45,9 +45,18 @@ def _label_ok(label: str, header: str) -> bool:
     return a == b or a in b or b in a or fuzz.ratio(a, b) >= LABEL_SIM
 
 
+_NUM_TOKEN = re.compile(r"[-−]?\d[\d,.]*%?")
+
+
+def _single_token_match(value: str, cell: str, tol: float) -> bool:
+    toks = _NUM_TOKEN.findall(cell)
+    return len(toks) == 1 and numbers_match(value, toks[0], tol)
+
+
 def rule_passes(rule: dict, tables: list[ChartTable]) -> bool:
     value = str(rule["value"])
     labels = [str(x) for x in rule.get("labels", [])]
+    tol = float(rule.get("relative_tolerance", 0.01))
     for t in tables:
         for row in t.rows:
             if not row:
@@ -55,7 +64,9 @@ def rule_passes(rule: dict, tables: list[ChartTable]) -> bool:
             for ci, cell in enumerate(row):
                 if ci == 0 or not cell:
                     continue
-                if not numbers_match(value, cell, 0.01):
+                # parse-bench also accepts the printed composite form ("25 (13.0%)")
+                # and a cell whose single numeric token matches the value
+                if not (numbers_match(value, cell, tol) or _norm(cell) == _norm(value) or _single_token_match(value, cell, tol)):
                     continue
                 col = t.header[ci] if ci < len(t.header) else ""
                 row_label = row[0]
