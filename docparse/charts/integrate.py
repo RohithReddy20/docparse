@@ -25,21 +25,28 @@ logger = logging.getLogger(__name__)
 _NUM_RE = re.compile(r"-?\d+(?:\.\d+)?")
 
 
-def _numbers(table: ChartTable) -> set[str]:
-    out: set[str] = set()
+def _key(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+def _points(table: ChartTable) -> set[tuple[str, str, str]]:
+    """(row label, column header, value) triples: the unit ParseBench scores."""
+    out: set[tuple[str, str, str]] = set()
     for row in table.rows:
-        for cell in row[1:]:
+        if not row:
+            continue
+        for ci, cell in enumerate(row[1:], start=1):
+            col = table.header[ci] if ci < len(table.header) else ""
             for m in _NUM_RE.findall(clean_number(cell)):
-                out.add(m)
+                out.add((_key(row[0]), _key(col), m))
     return out
 
 
-def _novel(table: ChartTable, seen: set[str], min_new: float = 0.3) -> bool:
-    nums = _numbers(table)
-    if len(nums) < 2:
+def _novel(table: ChartTable, seen: set[tuple[str, str, str]], min_new: float = 0.3) -> bool:
+    pts = _points(table)
+    if len(pts) < 2:
         return False
-    new = nums - seen
-    return len(new) / len(nums) >= min_new
+    return len(pts - seen) / len(pts) >= min_new
 
 
 def enhance_chart_blocks(blocks: list[dict[str, Any]], page: pymupdf.Page, tl: TextLayerPage) -> list[dict[str, Any]]:
@@ -47,7 +54,7 @@ def enhance_chart_blocks(blocks: list[dict[str, Any]], page: pymupdf.Page, tl: T
     if not chart_idx or tl.scanned:
         return blocks
     out = list(blocks)
-    seen: set[str] = set()
+    seen: set[tuple[str, str, str]] = set()
     extras: list[dict[str, Any]] = []
     for i in chart_idx:
         b = out[i]
@@ -68,12 +75,12 @@ def enhance_chart_blocks(blocks: list[dict[str, Any]], page: pymupdf.Page, tl: T
             out[i] = nb
         base = snapped or (parse_html_table(b["text"]) if "<table" in b["text"] else None)
         if base is not None:
-            seen |= _numbers(base)
+            seen |= _points(base)
         try:
             for t in textlabels.panel_tables(region):
                 if _novel(t, seen):
                     extras.append({**b, "text": t.to_html(), "source": "chart-textlabels", "continuation": False})
-                    seen |= _numbers(t)
+                    seen |= _points(t)
         except Exception as e:  # noqa: BLE001
             logger.warning("labels_table failed: %s", e)
     try:
@@ -81,7 +88,7 @@ def enhance_chart_blocks(blocks: list[dict[str, Any]], page: pymupdf.Page, tl: T
             if _novel(t, seen):
                 anchor = out[chart_idx[-1]]
                 extras.append({**anchor, "text": t.to_html(), "source": "chart-vector", "continuation": False})
-                seen |= _numbers(t)
+                seen |= _points(t)
     except Exception as e:  # noqa: BLE001
         logger.warning("vector reconstruction failed: %s", e)
     if extras:
