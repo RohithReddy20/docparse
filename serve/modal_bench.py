@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 
 import modal
+import threading
 from dotenv import dotenv_values
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -63,6 +64,18 @@ def run(pipeline: str, max_concurrent: int = 16, test: bool = False, extra: str 
     if not (data_dir / "docs").exists():
         _sh([sys.executable, "-c", "import docparse.cli; docparse.cli.main()", "download", *(["--test"] if test else [])], BENCH_DIR)
         vol.commit()
+    # Commit partial results periodically: CPU containers can be preempted, and a
+    # restarted run skips files that already have results on the volume.
+    stop = threading.Event()
+
+    def committer() -> None:
+        while not stop.wait(120):
+            try:
+                vol.commit()
+            except Exception as e:  # noqa: BLE001
+                print("volume commit failed:", e, flush=True)
+
+    threading.Thread(target=committer, daemon=True).start()
     cmd = [
         sys.executable, "-c", "import docparse.cli; docparse.cli.main()",
         "run", pipeline, "--max_concurrent", str(max_concurrent),
@@ -72,6 +85,7 @@ def run(pipeline: str, max_concurrent: int = 16, test: bool = False, extra: str 
     if extra:
         cmd += extra.split()
     rc = _sh(cmd, BENCH_DIR)
+    stop.set()
     vol.commit()
     out = Path(BENCH_DIR) / "output" / pipeline
     n = len(list(out.rglob("*.result.json"))) if out.exists() else 0
