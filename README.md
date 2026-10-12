@@ -45,9 +45,41 @@ cp .env.example .env                                    # paste URL (+ /v1)
 
 scripts/run_test.sh lightonocr3_0_8b_grounding
 uv run docparse serve lightonocr3_0_8b_grounding        # browse reports
+
+# Infinity-Parser2-Flash (served name must be the HF id; SDK sends model=<id>)
+scripts/deploy_infinity.sh --yes                        # prints the endpoint URL
+#   → INFINITY_ENDPOINT_URL=<url>/v1 in .env
+scripts/run_test.sh infinity_parser2_flash_modal
 ```
 
+Pipelines: `lightonocr3_0_8b_grounding`, `lightonocr3_0_8b_md`,
+`infinity_parser2_flash_modal` (built-in `infinity_parser2_flash` settings +
+env-driven endpoint + cold-start wait; uses the `infinity-parser2` PyPI SDK,
+which needs poppler: `brew install poppler`).
+
 `docparse` is `parse-bench` with this repo's providers/pipelines registered.
+
+## Oracle analysis
+
+Once several pipelines have results under `output/`, ask what a router could
+achieve by combining them:
+
+```bash
+uv run oracle lightonocr3_0_8b_grounding infinity_parser2_flash_modal \
+  [--output_dir output] [--costs costs.json] [--within 2] [--json]
+```
+
+Prints each pipeline's per-dimension mean (parse-bench's headline metric per
+category: GTRM, chart `rule_pass_rate`, content faithfulness, semantic
+formatting, layout element pass rate) and two oracles:
+
+- **oracle-by-dimension** – best single pipeline per dimension (a static router);
+- **oracle-by-example** – per-example max over pipelines (the ceiling for a
+  perfect per-page router).
+
+Overall is parse-bench's definition: the unweighted mean over categories.
+With `--costs costs.json` (`{"pipeline": cents_per_page}`) it also lists the
+cheapest pipeline within `--within` points of the per-dimension oracle.
 
 ## Layout
 
