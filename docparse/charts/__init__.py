@@ -53,8 +53,15 @@ class ChartTable:
     source: str = ""
 
     def to_html(self) -> str:
+        """Series as a <th> header row, categories as <th> row headers: ParseBench
+        associates a value's labels through the <th> chain of its row and column."""
         head = "".join(f"<th>{html.escape(h)}</th>" for h in self.header)
-        body = "".join("<tr>" + "".join(f"<td>{html.escape(c)}</td>" for c in r) + "</tr>" for r in self.rows)
+        body = "".join(
+            "<tr>" + "".join(
+                (f"<th>{html.escape(c)}</th>" if i == 0 else f"<td>{html.escape(c)}</td>") for i, c in enumerate(r)
+            ) + "</tr>"
+            for r in self.rows
+        )
         return f"<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"
 
 

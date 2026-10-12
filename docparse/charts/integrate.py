@@ -83,6 +83,14 @@ def chart_caption(region: ChartRegion, tl: TextLayerPage, table: ChartTable | No
     return cap[:400]
 
 
+_FIRST_TD_RE = re.compile(r"(<tr[^>]*>\s*)<td([^>]*)>(.*?)</td>", re.S | re.I)
+
+
+def row_headers(table_html: str) -> str:
+    """Make the first cell of every body row a <th> (category row header)."""
+    return _FIRST_TD_RE.sub(lambda m: f"{m.group(1)}<th{m.group(2)}>{m.group(3)}</th>", table_html)
+
+
 def with_caption(table_html: str, caption: str) -> str:
     if not caption or "<caption" in table_html:
         return table_html
@@ -111,7 +119,7 @@ def enhance_chart_blocks(blocks: list[dict[str, Any]], page: pymupdf.Page, tl: T
         base = snapped or (parse_html_table(b["text"]) if "<table" in b["text"] else None)
         caption = chart_caption(region, tl, base)
         nb = dict(b)
-        nb["text"] = with_caption(snapped.to_html() if snapped is not None else b["text"], caption)
+        nb["text"] = with_caption(snapped.to_html() if snapped is not None else row_headers(b["text"]), caption)
         nb["source"] = "chart-snap" if snapped is not None else b.get("source", "vlm")
         out[i] = nb
         if base is not None:
