@@ -31,12 +31,15 @@ PDF page ─┬─ text layer (PyMuPDF, CPU)  : spans + styling + drawings
               scaled by axis ticks (vector.reconstruct_page)
 ```
 
-Scores on the ParseBench test split (12 PDFs), identical VLM output for both rows:
+Scores on the **full ParseBench set** (2,078 files; identical VLM output for both
+rows, so every difference is the CPU-side reconciliation):
 
 | | table | chart | content | formatting | layout | overall |
 |---|---|---|---|---|---|---|
-| LightOnOCR-3-0.8B alone | 76.8 | 46.7 | 90.5 | 28.7 | 67.9 | 62.1 |
-| docparse_hybrid_v0 | 76.8 | 66.7 | 90.9 | 61.5 | 74.2 | 74.0 |
+| LightOnOCR-3-0.8B alone (our provider) | 83.5 | 61.0 | 88.9 | 64.7 | 66.0 | 72.8 |
+| docparse_hybrid_v0 | 83.5 | 70.5 | 89.0 | 70.6 | 71.7 | **77.0** |
+| LlamaParse Cost Effective (leaderboard) | 84.2 | 77.9 | 89.9 | 67.3 | 83.8 | 80.6 |
+| best open-weight single model (leaderboard) | 86.4 | 64.9 | 88.8 | 71.7 | 74.3 | 77.2 |
 
 Everything above the first row costs CPU only. Iterate without GPU:
 `scripts/reuse_raw.sh lightonocr3_0_8b_grounding docparse_hybrid_v0` re-normalizes
