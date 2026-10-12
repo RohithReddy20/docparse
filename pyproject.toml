@@ -1,0 +1,23 @@
+[project]
+name = "docparse"
+version = "0.1.0"
+description = "Open multi-step document parser benchmarked on ParseBench"
+requires-python = ">=3.12"
+dependencies = [
+    "modal>=1.6.0",
+    "openai>=1.0",
+    "parse-bench>=1.0.4",
+    "pillow>=10.0",
+    "pymupdf>=1.24",
+    "python-dotenv>=1.0",
+]
+
+[project.scripts]
+docparse = "docparse.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["docparse"]
