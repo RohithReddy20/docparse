@@ -236,20 +236,38 @@ def detector_items(
     for d in dets:
         label = d["label"]
         over = [b for b in located if _inter(b["bbox"], d["bbox"]) / _area(d["bbox"]) >= 0.3]
-        if label in HEADING:
-            agree = any(b["label"] in HEADING for b in over) or _emphasized({"bbox": d["bbox"]}, tl)
-            if not agree:
-                label = "text"
+        inside = [b for b in located if _inter(b["bbox"], d["bbox"]) / _area(b["bbox"]) >= 0.6 and b["label"] in TEXTUAL]
+        # The detector has no list-item class and merges stacked short elements: when
+        # several of our (finer) blocks sit inside one detector text box, emit ours.
+        if label in ("text", "list") and len(inside) >= 2 and sum(_area(b["bbox"]) for b in inside) >= 0.5 * _area(d["bbox"]):
+            for b in inside:
+                nb = dict(b)
+                nb["_key"] = (located.index(b), 0)
+                items.append(nb)
+            continue
+        if label == "text":
+            # A VLM heading that the detector folded into generic text.
+            heads = [b for b in inside if b["label"] in HEADING]
+            if heads and len(inside) == 1 and len(re.sub(r"\s+", " ", heads[0]["text"])) <= 120:
+                label = heads[0]["label"]
         text = ""
         if tl is not None and tl.has_text and not tl.scanned and label in TEXTUAL:
             text = " ".join(ln.text.strip() for ln in _lines_in_bbox(tl, d["bbox"]))
         if not text and over:
             best = max(over, key=lambda b: _inter(b["bbox"], d["bbox"]))
             text = re.sub(r"<[^>]+>", " ", best["text"]) if best["label"] in ("table", "chart") else best["text"]
-        items.append({"label": label, "bbox": list(d["bbox"]), "text": text, "source": "detector"})
+        # Order key: the VLM's reading order (scored higher than the detector's) via
+        # the block each box overlaps most, then the detector order within a block.
+        vlm_pos = max(range(len(located)), key=lambda k: _inter(located[k]["bbox"], d["bbox"]), default=None) if over else None
+        key = (vlm_pos if vlm_pos is not None else 10_000, d["order"])
+        items.append({"label": label, "bbox": list(d["bbox"]), "text": text, "source": "detector", "_key": key})
+    items.sort(key=lambda it: it["_key"])
+    for it in items:
+        it.pop("_key", None)
     # our blocks the detector missed, inserted by vertical position
+    emitted = {tuple(b["bbox"]) for b in items if b.get("source") != "detector"}
     for b in located:
-        if not b["text"] and b["label"] in TEXTUAL:
+        if tuple(b["bbox"]) in emitted or (not b["text"] and b["label"] in TEXTUAL):
             continue
         if any(_inter(b["bbox"], d["bbox"]) / _area(b["bbox"]) >= 0.5 for d in dets):
             continue
