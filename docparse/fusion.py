@@ -74,7 +74,9 @@ def _det_boxes(page_dets: dict[str, Any]) -> list[dict[str, Any]]:
         if not lab:
             continue
         x1, y1, x2, y2 = p["bbox"]
-        out.append({"bbox": [x1 / w * 1000, y1 / h * 1000, x2 / w * 1000, y2 / h * 1000], "label": lab, "score": p["score"]})
+        out.append({"bbox": [x1 / w * 1000, y1 / h * 1000, x2 / w * 1000, y2 / h * 1000], "label": lab, "score": p["score"], "order": p.get("order", len(out))})
+    # PP-DocLayoutV3 predicts reading order in the decoder; the metric scores it.
+    out.sort(key=lambda d: d["order"])
     return out
 
 
@@ -245,11 +247,13 @@ def detector_items(
             best = max(over, key=lambda b: _inter(b["bbox"], d["bbox"]))
             text = re.sub(r"<[^>]+>", " ", best["text"]) if best["label"] in ("table", "chart") else best["text"]
         items.append({"label": label, "bbox": list(d["bbox"]), "text": text, "source": "detector"})
-    # our blocks the detector missed
+    # our blocks the detector missed, inserted by vertical position
     for b in located:
         if not b["text"] and b["label"] in TEXTUAL:
             continue
         if any(_inter(b["bbox"], d["bbox"]) / _area(b["bbox"]) >= 0.5 for d in dets):
             continue
-        items.append(b)
+        cy = (b["bbox"][1] + b["bbox"][3]) / 2
+        pos = next((k for k, it in enumerate(items) if (it["bbox"][1] + it["bbox"][3]) / 2 > cy), len(items))
+        items.insert(pos, b)
     return items
