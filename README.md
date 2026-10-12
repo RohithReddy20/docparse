@@ -50,7 +50,19 @@ uv run docparse serve lightonocr3_0_8b_grounding        # browse reports
 scripts/deploy_infinity.sh --yes                        # prints the endpoint URL
 #   → INFINITY_ENDPOINT_URL=<url>/v1 in .env
 scripts/run_test.sh infinity_parser2_flash_modal
+
+# PP-DocLayoutV3 layout detection (T4 by default; DOCPARSE_LAYOUT_GPU=cpu for CPU)
+modal deploy serve/modal_paddle_layout.py               # prints the endpoint URL
+#   → PADDLE_LAYOUT_ENDPOINT_URL=<url> in .env (no /v1)
+scripts/run_test.sh ppdoclayout_v3_modal
 ```
+
+Layout detector: `PaddlePaddle/PP-DocLayoutV3` — Apache-2.0 weights (HF model
+card + PaddleOCR LICENSE), 25 classes, RT-DETR @ 800×800, ~70 ms/page on A100.
+The server (`serve/modal_paddle_layout.py`) folds V3-only labels into the 20
+PP-DocLayout classes parse-bench maps, keeps the original in `raw_label`, and
+returns boxes in model reading order. `docparse.layout.detect_layout()` is the
+client the composite pipeline uses.
 
 Pipelines: `lightonocr3_0_8b_grounding`, `lightonocr3_0_8b_md`,
 `infinity_parser2_flash_modal` (built-in `infinity_parser2_flash` settings +

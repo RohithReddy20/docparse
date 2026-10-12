@@ -19,6 +19,26 @@ _SPECS = [
         product_type=ProductType.PARSE,
         config={"prompt_mode": "transcribe"},
     ),
+    # Same settings as parse-bench's built-in `infinity_parser2_flash`
+    # (doc2json → bboxes), endpoint from INFINITY_ENDPOINT_URL.
+    PipelineSpec(
+        pipeline_name="infinity_parser2_flash_modal",
+        provider_name="infinity_parser2_modal",
+        product_type=ProductType.PARSE,
+        config={
+            "model_name": "infly/Infinity-Parser2-Flash",
+            "task_type": "doc2json",
+            "output_format": "json",
+            "max_new_tokens": 16384,
+        },
+    ),
+    # PP-DocLayoutV3 via serve/modal_paddle_layout.py; endpoint from PADDLE_LAYOUT_ENDPOINT_URL.
+    PipelineSpec(
+        pipeline_name="ppdoclayout_v3_modal",
+        provider_name="paddle_layout_modal",
+        product_type=ProductType.LAYOUT_DETECTION,
+        config={"dpi": 200},
+    ),
 ]
 
 for _spec in _SPECS:
