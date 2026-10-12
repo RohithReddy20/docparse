@@ -16,7 +16,11 @@ from typing import Any
 
 import pymupdf
 
-from docparse.charts import ChartTable, clean_number, parse_html_table, region_from_page
+import html as _html
+
+from rapidfuzz import fuzz
+
+from docparse.charts import ChartRegion, ChartTable, clean_number, is_numeric, parse_html_table, region_from_page
 from docparse.charts import textlabels, vector
 from docparse.textlayer import TextLayerPage
 
@@ -49,6 +53,42 @@ def _novel(table: ChartTable, seen: set[tuple[str, str, str]], min_new: float = 
     return len(pts - seen) / len(pts) >= min_new
 
 
+def chart_caption(region: ChartRegion, tl: TextLayerPage, table: ChartTable | None) -> str:
+    """Chart identity text for a ``<caption>``: title lines just above the box plus the
+    non-numeric strings inside it (panel titles, legend entries) that are not already
+    the table's row labels. ParseBench accepts a data point's title/series labels when
+    they appear in the table's caption or a heading next to it."""
+    x0, y0, x1, y1 = region.bbox
+    parts: list[str] = []
+    above = [
+        ln for ln in tl.lines
+        if ln.text.strip() and not is_numeric(ln.text) and y0 - 4 * max(8.0, ln.bbox[3] - ln.bbox[1]) <= ln.bbox[3] <= y0 + 2
+        and min(ln.bbox[2], x1) - max(ln.bbox[0], x0) > 0.3 * (x1 - x0)
+    ]
+    above.sort(key=lambda ln: -ln.bbox[3])
+    for ln in above[:2]:
+        parts.append(re.sub(r"\s+", " ", ln.text).strip())
+    row_labels = [r[0] for r in table.rows if r] if table else []
+    headers = table.header if table else []
+    seen: set[str] = set()
+    for sp in region.spans:
+        t = re.sub(r"\s+", " ", sp.text).strip()
+        if len(t) < 3 or is_numeric(t) or t.lower() in seen:
+            continue
+        if any(fuzz.ratio(t.lower(), r.lower()) >= 85 for r in row_labels + headers):
+            continue
+        seen.add(t.lower())
+        parts.append(t)
+    cap = " | ".join(dict.fromkeys(p for p in parts if p))
+    return cap[:400]
+
+
+def with_caption(table_html: str, caption: str) -> str:
+    if not caption or "<caption" in table_html:
+        return table_html
+    return re.sub(r"<table[^>]*>", lambda m: m.group(0) + f"<caption>{_html.escape(caption)}</caption>", table_html, count=1)
+
+
 def enhance_chart_blocks(blocks: list[dict[str, Any]], page: pymupdf.Page, tl: TextLayerPage) -> list[dict[str, Any]]:
     chart_idx = [i for i, b in enumerate(blocks) if b["label"] == "chart" and b.get("bbox") is not None]
     if not chart_idx or tl.scanned:
@@ -68,26 +108,29 @@ def enhance_chart_blocks(blocks: list[dict[str, Any]], page: pymupdf.Page, tl: T
         except Exception as e:  # noqa: BLE001
             logger.warning("snap_table failed: %s", e)
             snapped = None
-        if snapped is not None:
-            nb = dict(b)
-            nb["text"] = snapped.to_html()
-            nb["source"] = "chart-snap"
-            out[i] = nb
         base = snapped or (parse_html_table(b["text"]) if "<table" in b["text"] else None)
+        caption = chart_caption(region, tl, base)
+        nb = dict(b)
+        nb["text"] = with_caption(snapped.to_html() if snapped is not None else b["text"], caption)
+        nb["source"] = "chart-snap" if snapped is not None else b.get("source", "vlm")
+        out[i] = nb
         if base is not None:
             seen |= _points(base)
         try:
             for t in textlabels.panel_tables(region):
                 if _novel(t, seen):
-                    extras.append({**b, "text": t.to_html(), "source": "chart-textlabels", "continuation": False})
+                    extras.append({**b, "text": with_caption(t.to_html(), chart_caption(region, tl, t)), "source": "chart-textlabels", "continuation": False})
                     seen |= _points(t)
         except Exception as e:  # noqa: BLE001
             logger.warning("labels_table failed: %s", e)
+    anchor_b = out[chart_idx[-1]]
+    caption_for_anchor = re.search(r"<caption>(.*?)</caption>", anchor_b["text"], flags=re.S)
+    caption_for_anchor = _html.unescape(caption_for_anchor.group(1)) if caption_for_anchor else ""
     try:
         for t in vector.reconstruct_page(page, tl):
             if _novel(t, seen):
                 anchor = out[chart_idx[-1]]
-                extras.append({**anchor, "text": t.to_html(), "source": "chart-vector", "continuation": False})
+                extras.append({**anchor, "text": with_caption(t.to_html(), caption_for_anchor), "source": "chart-vector", "continuation": False})
                 seen |= _points(t)
     except Exception as e:  # noqa: BLE001
         logger.warning("vector reconstruction failed: %s", e)
