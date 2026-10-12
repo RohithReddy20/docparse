@@ -12,7 +12,10 @@ from parse_bench.inference.providers.registry import register_provider
 from parse_bench.schemas.parse_output import PageIR, ParseLayoutPageIR, ParseOutput
 from parse_bench.schemas.pipeline_io import InferenceResult, RawInferenceResult
 
+import pymupdf
+
 from docparse import textlayer
+from docparse.charts.integrate import enhance_chart_blocks
 from docparse.hybrid import reconcile_page
 from docparse.providers.lightonocr3 import (
     _LABEL_TO_CANONICAL_KEY,
@@ -38,6 +41,11 @@ class DocparseHybridProvider(LightOnOCR3Provider):
             logger.warning("text layer extraction failed for %s: %s", raw_result.request.source_file_path, e)
             layers = []
 
+        try:
+            doc = pymupdf.open(raw_result.request.source_file_path)
+        except Exception:  # noqa: BLE001
+            doc = None
+
         pages: list[PageIR] = []
         layout_pages: list[ParseLayoutPageIR] = []
         for p in raw["page_results"]:
@@ -45,6 +53,11 @@ class DocparseHybridProvider(LightOnOCR3Provider):
             blocks = parse_grounding(p["raw_text"])
             tl = layers[idx] if idx < len(layers) else None
             blocks = reconcile_page(blocks, tl)
+            if tl is not None and doc is not None and idx < len(doc):
+                try:
+                    blocks = enhance_chart_blocks(blocks, doc[idx], tl)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("chart enhancement failed on page %d: %s", idx, e)
             md = blocks_to_markdown(blocks)
             items = [
                 {"bbox": b["bbox"], "label": _LABEL_TO_CANONICAL_KEY.get(b["label"], "text"), "text": b["text"]}
@@ -59,6 +72,8 @@ class DocparseHybridProvider(LightOnOCR3Provider):
             layout_pages.append(lp)
             pages.append(PageIR(page_index=idx, markdown=md))
 
+        if doc is not None:
+            doc.close()
         output = ParseOutput(
             example_id=raw_result.request.example_id,
             pipeline_name=raw_result.pipeline_name,
