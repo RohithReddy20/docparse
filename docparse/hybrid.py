@@ -185,22 +185,27 @@ IDENTICAL = 97  # char-level ratio above which layer text replaces VLM text outr
 
 
 def _styled_runs(lines: list[Line]) -> list[tuple[str, Span]]:
-    """Maximal runs of consecutive spans sharing a non-default style, as (text, style)."""
+    """Maximal runs of consecutive spans sharing a non-default style, as (text, style).
+    A run continues across a line break when the next line starts with the same
+    style (a wrapped italic citation, a bold multi-line lead-in)."""
     runs: list[tuple[str, Span]] = []
+    cur: list[str] = []
+    key: tuple | None = None
+    proto: Span | None = None
     for ln in lines:
-        cur: list[str] = []
-        key: tuple | None = None
-        proto: Span | None = None
+        first = True
         for sp in ln.spans:
             k = (sp.bold, sp.italic, sp.underline, sp.strike, sp.mark, sp.sup)
             if key is not None and k == key:
-                cur.append(sp.text)
+                cur.append((" " if first and cur and not cur[-1].endswith(" ") else "") + sp.text)
+                first = False
                 continue
             if cur and any(key):
                 runs.append(("".join(cur), proto))
             cur, key, proto = [sp.text], k, sp
-        if cur and key is not None and any(key):
-            runs.append(("".join(cur), proto))
+            first = False
+    if cur and key is not None and any(key):
+        runs.append(("".join(cur), proto))
     return runs
 
 
@@ -232,16 +237,21 @@ def transfer_styles(vlm_text: str, lines: list[Line]) -> str:
         edits.append((a, b, style))
     for a, b, style in sorted(edits, reverse=True):
         seg = vlm_text[a:b]
-        if seg.strip():
-            vlm_text = vlm_text[:a] + _wrap_vlm(seg, style) + vlm_text[b:]
+        if not seg.strip():
+            continue
+        # The VLM often emits its own **bold**; wrapping inside it yields ****x****.
+        inside_bold = vlm_text[max(0, a - 2):a] == "**" and vlm_text[b:b + 2] == "**"
+        if "**" in seg or "*" in seg:
+            inside_bold = True  # markup already present in the segment: styling only, no bold
+        vlm_text = vlm_text[:a] + _wrap_vlm(seg, style, skip_bold=inside_bold) + vlm_text[b:]
     return vlm_text
 
 
-def _wrap_vlm(seg: str, style: Span) -> str:
+def _wrap_vlm(seg: str, style: Span, skip_bold: bool = False) -> str:
     lead = re.match(r"^\s*", seg).group(0)
     trail = re.search(r"\s*$", seg).group(0)
     core = seg.strip()
-    already_bold = core.startswith("**") and core.endswith("**")
+    already_bold = skip_bold or (core.startswith("**") and core.endswith("**"))
     inner = _inner(core, Span(text=core, bbox=style.bbox, size=style.size, italic=style.italic and not style.bold,
                                underline=style.underline, strike=style.strike, mark=style.mark, sup=style.sup))
     if style.bold and not already_bold:
@@ -272,15 +282,38 @@ def render_blocks(
         return None
     vlm = block["text"]
     if block["label"] == "title":
-        # Headings are short; the layer's characters are reliable there and the
-        # per-line split (stacked headings) matters for the title rules.
-        layer_text = " ".join(ln.text for ln in lines)
-        if _GARBAGE_RE.search(layer_text) or fuzz.token_set_ratio(_norm(layer_text), _norm(vlm)) < MIN_SIMILARITY:
-            return None
-        text = _render_group("title", lines, tl)
-        nb = dict(block)
-        nb.update(text=text, bbox=_lines_bbox1000(lines, tl), source="textlayer")
-        return [nb]
+        # VLM characters; the layer gives the heading level (font size) and the
+        # split between stacked headings (vertical gaps), never line wraps.
+        level = _heading_level(lines, tl)
+        groups = _paragraphs(lines)
+        plain = _heading_text(re.sub(r"^\s*#{1,6}\s*", "", vlm, flags=re.M))
+        if len(groups) <= 1:
+            nb = dict(block)
+            nb.update(text=f"{'#' * level} {plain}", bbox=_lines_bbox1000(lines, tl), source="styled-vlm")
+            return [nb]
+        cuts = []
+        lo = 0
+        for g in groups:
+            sl = _align_slice(plain, " ".join(ln.text for ln in g), lo)
+            if sl is None:
+                cuts = []
+                break
+            cuts.append((sl[0], g))
+            lo = sl[1]
+        if not cuts:
+            nb = dict(block)
+            nb.update(text=f"{'#' * level} {plain}", bbox=_lines_bbox1000(lines, tl), source="styled-vlm")
+            return [nb]
+        out = []
+        for i, (a, g) in enumerate(cuts):
+            start = a if i > 0 else 0
+            stop = cuts[i + 1][0] if i + 1 < len(cuts) else len(plain)
+            seg = _heading_text(plain[start:stop])
+            if seg:
+                nb = dict(block)
+                nb.update(text=f"{'#' * level} {seg}", bbox=_lines_bbox1000(g, tl), source="styled-vlm-split")
+                out.append(nb)
+        return out or None
 
     groups = _paragraphs(lines) if block["label"] in ("text", "list", "footnote") else [lines]
     parts: list[tuple[str, list[Line]]] = []
