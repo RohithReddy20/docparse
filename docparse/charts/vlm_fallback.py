@@ -81,8 +81,60 @@ def parse_tsv_table(text: str) -> ChartTable | None:
     return ChartTable(header=rows[0], rows=rows[1:], source="chart-vlm")
 
 
+_NUMERIC = re.compile(r"^[+\-−–]?\s*[$€£¥]?\s*\d[\d,.]*\s*(%|[A-Za-z%./]{1,8}|p\.p\.|%pts)?\s*$", re.I)
+_BULLET_KV = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s*\**\s*(.+?)\s*\**\s*[:：]\s*\**\s*(.+?)\**\s*$")
+_HEADING = re.compile(r"^\s*(?:#{1,6}\s+(.+?)\s*#*|\*\*(.+?)\**\s*:?\*\*|([^\-*•#].+?):)\s*$")
+_SKIP_HEADINGS = {"chart recognition", "chart description", "data", "data points", "legend", "axes", "values", "series", "categories"}
+
+
+def parse_bullet_table(text: str) -> ChartTable | None:
+    """Markdown description with ``- label: value`` bullets, optionally grouped under
+    headings (``### Series`` or ``- **Group:**`` with indented children). Groups become
+    columns, bullet labels become rows; a single group gives a two-column table."""
+    triples: list[tuple[str, str, str]] = []  # (group, label, value)
+    group = ""
+    group_indent = -1
+    for raw in text.splitlines():
+        if not raw.strip():
+            continue
+        indent = len(raw) - len(raw.lstrip())
+        m = _BULLET_KV.match(raw)
+        if m and _NUMERIC.match(m.group(2)):
+            if indent <= group_indent:
+                group, group_indent = "", -1
+            triples.append((group, _clean(m.group(1)), _clean(m.group(2))))
+            continue
+        h = _HEADING.match(raw)
+        if h:
+            name = _clean(h.group(1) or h.group(2) or h.group(3) or "")
+            if name and name.lower() not in _SKIP_HEADINGS and not _NUMERIC.match(name):
+                group, group_indent = name, -1
+            continue
+        b = re.match(r"^\s*(?:[-*•]|\d+[.)])\s*\**\s*(.+?)\s*:?\s*\**\s*$", raw)
+        if b and _clean(b.group(1)).lower() not in _SKIP_HEADINGS:
+            group, group_indent = _clean(b.group(1)).rstrip(":"), indent
+    if len(triples) < 2:
+        return None
+    groups: list[str] = []
+    labels: list[str] = []
+    for g, lab, _ in triples:
+        if g not in groups:
+            groups.append(g)
+        if lab not in labels:
+            labels.append(lab)
+    cells: dict[tuple[str, str], str] = {(g, lab): v for g, lab, v in triples}
+    if groups == [""]:
+        return ChartTable(header=["", "Value"], rows=[[lab, cells[("", lab)]] for lab in labels], source="chart-vlm")
+    if len(labels) == 1 and all(g for g in groups):
+        return ChartTable(header=["", labels[0]], rows=[[g, cells.get((g, labels[0]), "")] for g in groups], source="chart-vlm")
+    header = [""] + [g or "Value" for g in groups]
+    rows = [[lab] + [cells.get((g, lab), "") for g in groups] for lab in labels]
+    return ChartTable(header=header, rows=rows, source="chart-vlm")
+
+
 def parse_model_output(text: str) -> list[ChartTable]:
-    """All tables in a model answer: HTML first, then pipe tables, then TSV."""
+    """All tables in a model answer: HTML first, then pipe tables, then TSV, then
+    ``- label: value`` bullet descriptions."""
     if not text or not text.strip():
         return []
     tables: list[ChartTable] = []
@@ -97,6 +149,9 @@ def parse_model_output(text: str) -> list[ChartTable]:
         t = parse_pipe_table(text)
         if t is not None:
             return [t]
+    t = parse_bullet_table(text)
+    if t is not None:
+        return [t]
     t = parse_tsv_table(text)
     return [t] if t is not None else []
 
