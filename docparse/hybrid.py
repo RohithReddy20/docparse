@@ -249,40 +249,76 @@ def _wrap_vlm(seg: str, style: Span) -> str:
     return f"{lead}{inner}{trail}"
 
 
+def _align_slice(text: str, query: str, lo: int) -> tuple[int, int] | None:
+    """Locate ``query`` (a layer group's text) inside ``text`` at or after ``lo``."""
+    q = re.sub(r"\s+", " ", query).strip()
+    if len(q) < 3 or lo >= len(text):
+        return None
+    al = fuzz.partial_ratio_alignment(q, text[lo:])
+    if al is None or al.score < 80:
+        return None
+    return lo + al.dest_start, lo + al.dest_end
+
+
 def render_blocks(
     block: dict[str, Any], tl: TextLayerPage, claimed: set[int] | None = None
 ) -> list[dict[str, Any]] | None:
-    """Text-layer rendering of a VLM block as one or more blocks (split on paragraph
-    gaps, bboxes tightened to the text), or None to keep the VLM block."""
+    """VLM characters + text-layer styling, split into the layer's paragraphs / list
+    items / headings with tight bboxes. Returns None to keep the VLM block as is."""
     if block["label"] not in TEXT_LABELS or block.get("bbox") is None:
         return None
     lines = _lines_in_bbox(tl, block["bbox"], claimed)
     if not lines:
         return None
-    layer_text = " ".join(ln.text for ln in lines)
-    unreliable = bool(_GARBAGE_RE.search(layer_text))
-    identical = (
-        not unreliable
-        and fuzz.ratio(_norm(layer_text), _norm(block["text"])) >= IDENTICAL
-        and len(_norm(layer_text)) >= 0.85 * len(_norm(block["text"]))
-    )
-    if not identical:
-        # Keep the VLM's characters, borrow the layer's styling.
-        if block["label"] == "title":
+    vlm = block["text"]
+    if block["label"] == "title":
+        # Headings are short; the layer's characters are reliable there and the
+        # per-line split (stacked headings) matters for the title rules.
+        layer_text = " ".join(ln.text for ln in lines)
+        if _GARBAGE_RE.search(layer_text) or fuzz.token_set_ratio(_norm(layer_text), _norm(vlm)) < MIN_SIMILARITY:
             return None
+        text = _render_group("title", lines, tl)
         nb = dict(block)
-        nb.update(text=transfer_styles(block["text"], lines), source="styled-vlm")
+        nb.update(text=text, bbox=_lines_bbox1000(lines, tl), source="textlayer")
         return [nb]
+
     groups = _paragraphs(lines) if block["label"] in ("text", "list", "footnote") else [lines]
-    out: list[dict[str, Any]] = []
+    parts: list[tuple[str, list[Line]]] = []
     for g in groups:
-        for label, sub in _split_items_and_headings(block["label"], g, tl):
-            text = _render_group(label, sub, tl)
-            if not text:
-                continue
-            nb = dict(block)
-            nb.update(label=label, text=text, bbox=_lines_bbox1000(sub, tl), source="textlayer")
-            out.append(nb)
+        parts.extend(_split_items_and_headings(block["label"], g, tl))
+    if len(parts) <= 1:
+        nb = dict(block)
+        nb.update(text=transfer_styles(vlm, lines), source="styled-vlm")
+        return [nb]
+
+    # Cut the VLM text where the layer's groups start, keeping VLM characters.
+    cuts: list[tuple[int, int, str, list[Line]]] = []
+    lo = 0
+    for label, sub in parts:
+        sl = _align_slice(vlm, " ".join(ln.text for ln in sub), lo)
+        if sl is None:
+            cuts = []
+            break
+        cuts.append((sl[0], sl[1], label, sub))
+        lo = sl[1]
+    if not cuts:
+        nb = dict(block)
+        nb.update(text=transfer_styles(vlm, lines), source="styled-vlm")
+        return [nb]
+    out: list[dict[str, Any]] = []
+    for i, (a, b, label, sub) in enumerate(cuts):
+        start = a if i > 0 else 0
+        stop = cuts[i + 1][0] if i + 1 < len(cuts) else len(vlm)
+        seg = vlm[start:stop].strip()
+        if not seg:
+            continue
+        if label in ("section_header", "section-header"):
+            seg = f"## {_heading_text(seg)}"
+        else:
+            seg = transfer_styles(seg, sub)
+        nb = dict(block)
+        nb.update(label=label, text=seg, bbox=_lines_bbox1000(sub, tl), source="styled-vlm-split")
+        out.append(nb)
     return out or None
 
 
