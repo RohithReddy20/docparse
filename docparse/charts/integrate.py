@@ -22,6 +22,7 @@ from rapidfuzz import fuzz
 
 from docparse.charts import ChartRegion, ChartTable, clean_number, is_numeric, parse_html_table, region_from_page
 from docparse.charts import textlabels, vector
+from docparse.charts.vlm_fallback import fallback_tables, load_chart_vlm
 from docparse.textlayer import TextLayerPage
 
 logger = logging.getLogger(__name__)
@@ -104,6 +105,13 @@ def enhance_chart_blocks(blocks: list[dict[str, Any]], page: pymupdf.Page, tl: T
     out = list(blocks)
     seen: set[tuple[str, str, str]] = set()
     extras: list[dict[str, Any]] = []
+    vlm_record = None
+    try:
+        dump = load_chart_vlm(page.parent.name) if getattr(page, "parent", None) is not None else None
+        if dump and page.number < len(dump.get("pages", [])):
+            vlm_record = dump["pages"][page.number]
+    except Exception as e:  # noqa: BLE001
+        logger.warning("chart_vlm lookup failed: %s", e)
     for i in chart_idx:
         b = out[i]
         bbox_pts = [
@@ -124,6 +132,11 @@ def enhance_chart_blocks(blocks: list[dict[str, Any]], page: pymupdf.Page, tl: T
         out[i] = nb
         if base is not None:
             seen |= _points(base)
+        # Chart-crop VLM (PaddleOCR-VL-1.6 "Chart Recognition:") tables, when dumped.
+        for t in fallback_tables(vlm_record, b["bbox"]):
+            if _novel(t, seen):
+                extras.append({**b, "text": with_caption(t.to_html(), caption), "source": "chart-vlm", "continuation": False})
+                seen |= _points(t)
         try:
             for t in textlabels.panel_tables(region):
                 if _novel(t, seen):
