@@ -31,7 +31,6 @@ import pymupdf as fitz
 from openai import OpenAI
 from PIL import Image
 
-from parse_bench.inference.providers.parse._layout_utils import build_layout_pages
 from parse_bench.inference.providers.base import (
     Provider,
     ProviderConfigError,
@@ -39,35 +38,56 @@ from parse_bench.inference.providers.base import (
     ProviderTransientError,
 )
 from parse_bench.inference.providers.registry import register_provider
-from parse_bench.schemas.parse_output import PageIR, ParseLayoutPageIR, ParseOutput
+from parse_bench.schemas.parse_output import LayoutItemIR, LayoutSegmentIR, PageIR, ParseLayoutPageIR, ParseOutput
 from parse_bench.schemas.pipeline import PipelineSpec
 from parse_bench.schemas.pipeline_io import InferenceRequest, InferenceResult, RawInferenceResult
 
 logger = logging.getLogger(__name__)
 
-_PLACEHOLDER_RE = re.compile(r"^!\[([A-Za-z_\-]+?)(\+?)\]\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)\s*$")
+# Observed output: ``![label](x1,y1,x2,y2) first line of content`` — the
+# placeholder and the content share a line; later lines belong to the block.
+_PLACEHOLDER_RE = re.compile(
+    r"^!\[([A-Za-z_\-]+?)(\+?)\]\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)[ \t]?(.*)$"
+)
 
-# LightOnOCR label -> key understood by parse-bench's LABEL_MAP (Canonical17).
+# LightOnOCR label -> LlamaParse "v3" raw layout label (lowercase Canonical17).
+# parse-bench's layout evaluator routes every ParseOutput with layout_pages
+# through its LlamaParse adapter, which only accepts that vocabulary.
+# Labels seen so far: text, title, image, header, chart, caption, page_number,
+# table, footnote, list, footer, header_image, footer_image, aside_text.
 _LABEL_TO_CANONICAL_KEY: dict[str, str] = {
     "title": "title",
     "section_header": "section-header",
     "section-header": "section-header",
     "header": "page-header",
+    "header_image": "page-header",
     "page_header": "page-header",
     "text": "text",
+    "aside_text": "text",
     "list": "list-item",
     "list_item": "list-item",
     "image": "picture",
     "figure": "picture",
     "picture": "picture",
-    "chart": "picture",
+    "chart": "chart",
     "table": "table",
     "formula": "formula",
     "caption": "caption",
     "footnote": "footnote",
     "footer": "page-footer",
+    "footer_image": "page-footer",
     "page_footer": "page-footer",
+    "page_number": "page-footer",
 }
+
+# Page furniture is copied into the structured per-page fields (is_header /
+# is_footer rules read those) and also kept in the body markdown: the content
+# faithfulness rules expect header/footer sentences to be present. Image
+# descriptions are the model's prose, not page text, so they stay out.
+_HEADER_LABELS = {"header", "page_header"}
+_FOOTER_LABELS = {"footer", "page_footer"}
+_PAGE_NUMBER_LABELS = {"page_number"}
+_NON_BODY_LABELS = {"image", "header_image", "footer_image"}
 
 
 def render_pdf_pages(pdf_path: str, dpi: int, max_edge: int) -> list[Image.Image]:
@@ -101,13 +121,13 @@ def parse_grounding(text: str) -> list[dict[str, Any]]:
         m = _PLACEHOLDER_RE.match(line.strip())
         if m:
             flush()
-            label, cont, x1, y1, x2, y2 = m.groups()
+            label, cont, x1, y1, x2, y2, rest = m.groups()
             current = {
                 "label": label.lower(),
                 "continuation": cont == "+",
                 "bbox": [int(x1), int(y1), int(x2), int(y2)],
             }
-            buf = []
+            buf = [rest] if rest else []
         elif current is not None:
             buf.append(line)
         elif line.strip():
@@ -118,21 +138,65 @@ def parse_grounding(text: str) -> list[dict[str, Any]]:
     return blocks
 
 
+def _block_markdown(b: dict[str, Any]) -> str:
+    t = b["text"]
+    label = b["label"]
+    if label == "title" and not t.lstrip().startswith("#"):
+        return f"# {t}"
+    if label in ("section_header", "section-header") and not t.lstrip().startswith("#"):
+        return f"## {t}"
+    if label == "formula" and not t.lstrip().startswith("$"):
+        return f"$$\n{t}\n$$"
+    return t
+
+
 def blocks_to_markdown(blocks: list[dict[str, Any]]) -> str:
+    """Body markdown: furniture and image descriptions excluded, ``+`` blocks joined to their predecessor."""
     parts: list[str] = []
     for b in blocks:
-        t = b["text"]
-        if not t:
+        if not b["text"] or b["label"] in _NON_BODY_LABELS:
             continue
-        label = b["label"]
-        if label == "title" and not t.lstrip().startswith("#"):
-            t = f"# {t}"
-        elif label in ("section_header", "section-header") and not t.lstrip().startswith("#"):
-            t = f"## {t}"
-        elif label == "formula" and not t.lstrip().startswith("$"):
-            t = f"$$\n{t}\n$$"
-        parts.append(t)
+        md = _block_markdown(b)
+        if b["continuation"] and parts:
+            parts[-1] = f"{parts[-1]}\n{md}"
+        else:
+            parts.append(md)
     return "\n\n".join(parts)
+
+
+def page_furniture(blocks: list[dict[str, Any]]) -> dict[str, str]:
+    """Header / footer / printed page number text for ``ParseLayoutPageIR``."""
+    out = {"header": [], "footer": [], "page_number": []}
+    for b in blocks:
+        if not b["text"]:
+            continue
+        if b["label"] in _HEADER_LABELS:
+            out["header"].append(b["text"])
+        elif b["label"] in _FOOTER_LABELS:
+            out["footer"].append(b["text"])
+        elif b["label"] in _PAGE_NUMBER_LABELS:
+            out["page_number"].append(b["text"])
+    return {k: " | ".join(v) for k, v in out.items()}
+
+
+def build_layout_page(
+    items: list[dict[str, Any]], width: int, height: int, markdown: str, page_number: int
+) -> ParseLayoutPageIR:
+    """``ParseLayoutPageIR`` from ``{bbox: [x1,y1,x2,y2] on a 0-1000 grid, label, text}`` items."""
+    layout_items: list[LayoutItemIR] = []
+    for it in items:
+        # Segment coords are in page units (image pixels here), like LlamaParse's
+        # layoutAwareBbox: the layout extractor rescales by page width/height.
+        x1, y1, x2, y2 = (max(0.0, min(1000.0, float(v))) / 1000.0 for v in it["bbox"])
+        x1, x2 = x1 * width, x2 * width
+        y1, y2 = y1 * height, y2 * height
+        label = it["label"]
+        seg = LayoutSegmentIR(x=x1, y=y1, w=max(0.0, x2 - x1), h=max(0.0, y2 - y1), confidence=1.0, label=label)
+        item_type = "table" if label == "table" else "image" if label in ("picture", "chart") else "text"
+        layout_items.append(LayoutItemIR(type=item_type, value=it["text"], bbox=seg, layout_segments=[seg]))
+    return ParseLayoutPageIR(
+        page_number=page_number, width=float(width), height=float(height), md=markdown, items=layout_items
+    )
 
 
 @register_provider("lightonocr3")
@@ -193,7 +257,9 @@ class LightOnOCR3Provider(Provider):
             pipeline=pipeline,
             pipeline_name=pipeline.pipeline_name,
             product_type=request.product_type,
-            raw_output={"model": self._model, "prompt_mode": self._prompt_mode, "pages": pages},
+            # Key is deliberately not "pages": parse-bench's layout adapter treats a
+            # raw_output["pages"] list as LlamaParse payload and ignores layout_pages.
+            raw_output={"model": self._model, "prompt_mode": self._prompt_mode, "page_results": pages},
             started_at=started,
             completed_at=completed,
             latency_in_ms=int((completed - started).total_seconds() * 1000),
@@ -202,10 +268,12 @@ class LightOnOCR3Provider(Provider):
     # -- normalization -----------------------------------------------------
 
     def normalize(self, raw_result: RawInferenceResult) -> InferenceResult:
-        raw = raw_result.raw_output
+        raw = dict(raw_result.raw_output)
+        if "pages" in raw:  # raw files written before the key rename
+            raw["page_results"] = raw.pop("pages")
         pages: list[PageIR] = []
         layout_pages: list[ParseLayoutPageIR] = []
-        for p in raw["pages"]:
+        for p in raw["page_results"]:
             idx = p["page_index"]
             if raw.get("prompt_mode") == "grounding":
                 blocks = parse_grounding(p["raw_text"])
@@ -215,9 +283,12 @@ class LightOnOCR3Provider(Provider):
                     for b in blocks
                     if b["bbox"] is not None
                 ]
-                layout_pages.extend(
-                    build_layout_pages(items, p["width"], p["height"], md, page_number=idx + 1, bbox_scale=1000.0)
-                )
+                page_layout = build_layout_page(items, p["width"], p["height"], md, idx + 1)
+                furniture = page_furniture(blocks)
+                page_layout.page_header_markdown = furniture["header"]
+                page_layout.page_footer_markdown = furniture["footer"]
+                page_layout.printed_page_number = furniture["page_number"]
+                layout_pages.append(page_layout)
             else:
                 md = p["raw_text"].strip()
             pages.append(PageIR(page_index=idx, markdown=md))

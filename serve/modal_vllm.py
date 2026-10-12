@@ -25,7 +25,7 @@ EXTRA_ARGS = os.environ.get("DOCPARSE_VLLM_ARGS", "")
 APP_NAME = "docparse-" + re.sub(r"[^a-z0-9]+", "-", SERVED_NAME.lower()).strip("-")
 
 PORT = 8000
-HF_CACHE = "/root/.cache/huggingface"
+CACHE_DIR = "/root/.cache"  # HF weights + vLLM torch.compile artifacts persist across cold starts
 
 image = (
     modal.Image.from_registry("nvidia/cuda:12.8.1-devel-ubuntu22.04", add_python="3.12")
@@ -40,7 +40,7 @@ app = modal.App(APP_NAME)
 @app.function(
     image=image,
     gpu=GPU,
-    volumes={HF_CACHE: hf_cache},
+    volumes={CACHE_DIR: hf_cache},
     scaledown_window=120,
     timeout=3600,
     max_containers=1,
