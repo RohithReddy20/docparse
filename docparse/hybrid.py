@@ -185,128 +185,101 @@ _GARBAGE_RE = re.compile(r"[\u00a4\ufffd\ue000-\uf8ff\x00-\x08\x0b\x0c\x0e-\x1f]
 IDENTICAL = 97  # char-level ratio above which layer text replaces VLM text outright
 
 
+_ATTRS = ("mark", "sup", "strike", "underline", "italic", "bold")
+_OPEN = {"mark": "<mark>", "sup": "<sup>", "strike": "~~", "underline": "<u>", "italic": "*", "bold": "**"}
+_CLOSE = {"mark": "</mark>", "sup": "</sup>", "strike": "~~", "underline": "</u>", "italic": "*", "bold": "**"}
+
+
+def _attr_runs(lines: list[Line], attr: str) -> list[str]:
+    """Maximal runs of consecutive spans (across line breaks) with ``attr`` set."""
+    runs: list[str] = []
+    cur: list[str] = []
+    for ln in lines:
+        first = True
+        for sp in ln.spans:
+            if getattr(sp, attr):
+                if cur and first and not cur[-1].endswith(" "):
+                    cur.append(" ")
+                cur.append(sp.text)
+            elif cur:
+                runs.append("".join(cur))
+                cur = []
+            first = False
+    if cur:
+        runs.append("".join(cur))
+    return [r for r in runs if len(r.strip()) >= 2]
+
+
 def _styled_runs(lines: list[Line]) -> list[tuple[str, Span]]:
-    """Maximal runs of consecutive spans sharing a non-default style, as (text, style).
-    A run continues across a line break when the next line starts with the same
-    style (a wrapped italic citation, a bold multi-line lead-in)."""
+    """Kept for callers: runs with any non-default style (combined key)."""
     runs: list[tuple[str, Span]] = []
     cur: list[str] = []
     key: tuple | None = None
     proto: Span | None = None
     for ln in lines:
-        first = True
         for sp in ln.spans:
             k = (sp.bold, sp.italic, sp.underline, sp.strike, sp.mark, sp.sup)
             if key is not None and k == key:
-                cur.append((" " if first and cur and not cur[-1].endswith(" ") else "") + sp.text)
-                first = False
+                cur.append(sp.text)
                 continue
             if cur and any(key):
                 runs.append(("".join(cur), proto))
             cur, key, proto = [sp.text], k, sp
-            first = False
     if cur and key is not None and any(key):
         runs.append(("".join(cur), proto))
     return runs
 
 
 def transfer_styles(vlm_text: str, lines: list[Line]) -> str:
-    """Wrap the VLM's characters with the text layer's styling: each styled run is
-    located in ``vlm_text`` by fuzzy alignment and wrapped in place. Characters stay
-    the VLM's (symbol fonts and clipped layers make the layer's unreliable)."""
-    runs = _styled_runs(lines)
-    if not runs:
+    """Wrap the VLM's characters with the text layer's styling. Every attribute's
+    maximal runs are located in the *clean* text by fuzzy alignment; all markers
+    are then inserted in one pass with proper nesting (bold outermost … mark
+    innermost), so an underline crossing a highlight or a line break stays one
+    ``<u>…</u>``. Characters stay the VLM's."""
+    ranges: list[tuple[int, int, str]] = []
+    for attr in _ATTRS:
+        taken: list[tuple[int, int]] = []
+        for run in _attr_runs(lines, attr):
+            q = re.sub(r"\s+", " ", run).strip()
+            al = fuzz.partial_ratio_alignment(q, vlm_text)
+            if al is None or al.score < (85 if len(q) >= 10 else 75):
+                continue
+            a, b = al.dest_start, al.dest_end
+            while a > 0 and vlm_text[a - 1].isalnum() and vlm_text[a].isalnum():
+                a -= 1
+            while b < len(vlm_text) and vlm_text[b - 1].isalnum() and vlm_text[b].isalnum():
+                b += 1
+            # trim whitespace into the outside of the markers
+            while a < b and vlm_text[a].isspace():
+                a += 1
+            while b > a and vlm_text[b - 1].isspace():
+                b -= 1
+            if a >= b or any(not (b <= x0 or a >= x1) for x0, x1 in taken):
+                continue
+            seg = vlm_text[a:b]
+            if attr == "bold" and ("**" in seg or vlm_text[max(0, a - 2):a] == "**"):
+                continue  # the VLM already emitted bold here
+            if attr == "italic" and ("*" in seg or vlm_text[max(0, a - 1):a] == "*"):
+                continue
+            taken.append((a, b))
+            ranges.append((a, b, attr))
+    if not ranges:
         return vlm_text
-    edits: list[tuple[int, int, Span]] = []
-    taken: list[tuple[int, int]] = []
-    for text, style in runs:
-        q = re.sub(r"\s+", " ", text).strip()
-        if len(q) < 2:
-            continue
-        al = fuzz.partial_ratio_alignment(q, vlm_text)
-        if al is None or al.score < (85 if len(q) >= 10 else 75):
-            continue
-        a, b = al.dest_start, al.dest_end
-        # snap to word boundaries
-        while a > 0 and vlm_text[a - 1].isalnum() and vlm_text[a].isalnum():
-            a -= 1
-        while b < len(vlm_text) and vlm_text[b - 1].isalnum() and vlm_text[b].isalnum():
-            b += 1
-        if any(not (b <= x0 or a >= x1) for x0, x1 in taken):
-            continue
-        taken.append((a, b))
-        edits.append((a, b, style))
-    for a, b, style in sorted(edits, reverse=True):
-        seg = vlm_text[a:b]
-        if not seg.strip():
-            continue
-        # The VLM often emits its own **bold**; wrapping inside it yields ****x****.
-        inside_bold = vlm_text[max(0, a - 2):a] == "**" and vlm_text[b:b + 2] == "**"
-        if "**" in seg or "*" in seg:
-            inside_bold = True  # markup already present in the segment: styling only, no bold
-        vlm_text = vlm_text[:a] + _wrap_vlm(seg, style, skip_bold=inside_bold) + vlm_text[b:]
-    return vlm_text
-
-
-def _wrap_vlm(seg: str, style: Span, skip_bold: bool = False) -> str:
-    lead = re.match(r"^\s*", seg).group(0)
-    trail = re.search(r"\s*$", seg).group(0)
-    core = seg.strip()
-    already_bold = skip_bold or (core.startswith("**") and core.endswith("**"))
-    inner = _inner(core, Span(text=core, bbox=style.bbox, size=style.size, italic=style.italic and not style.bold,
-                               underline=style.underline, strike=style.strike, mark=style.mark, sup=style.sup))
-    if style.bold and not already_bold:
-        inner = f"**{inner}**"
-    return f"{lead}{inner}{trail}"
-
-
-_VLM_BULLET_RE = re.compile(r"^\s*(?:[-*\u2022\u25aa\u25cf\u2013]|\d{1,3}[.)]|[a-zA-Z][.)])\s+\S", re.M)
-
-
-def _vlm_list_items(vlm: str) -> list[str] | None:
-    """Lines of a VLM block that are markdown list items (each is its own element)."""
-    lines = [ln for ln in vlm.splitlines() if ln.strip()]
-    if len(lines) < 2 or sum(bool(_VLM_BULLET_RE.match(ln)) for ln in lines) < max(2, int(0.8 * len(lines))):
-        return None
-    items: list[str] = []
-    for ln in lines:
-        if _VLM_BULLET_RE.match(ln) or not items:
-            items.append(ln.strip())
-        else:
-            items[-1] += " " + ln.strip()  # wrapped continuation
-    return items
-
-
-def _split_vlm_items(block: dict[str, Any], items: list[str], lines: list[Line], tl: TextLayerPage) -> list[dict[str, Any]]:
-    """One block per list item; bbox from the layer lines that match the item text."""
-    out: list[dict[str, Any]] = []
-    pool = list(lines)
-    for item in items:
-        body = re.sub(r"^\s*(?:[-*\u2022\u25aa\u25cf\u2013]|\d{1,3}[.)]|[a-zA-Z][.)])\s+", "", item)
-        matched: list[Line] = []
-        for ln in pool:
-            t = ln.text.strip()
-            if len(t) >= 3 and fuzz.partial_ratio(t, body) >= 85:
-                matched.append(ln)
-        for ln in matched:
-            pool.remove(ln)
-        nb = dict(block)
-        nb.update(text=transfer_styles(item, matched) if matched else item, source="vlm-item")
-        if matched:
-            nb["bbox"] = _lines_bbox1000(matched, tl)
-        out.append(nb)
-    return out
-
-
-def _align_slice(text: str, query: str, lo: int) -> tuple[int, int] | None:
-    """Locate ``query`` (a layer group's text) inside ``text`` at or after ``lo``."""
-    q = re.sub(r"\s+", " ", query).strip()
-    if len(q) < 3 or lo >= len(text):
-        return None
-    al = fuzz.partial_ratio_alignment(q, text[lo:])
-    if al is None or al.score < 80:
-        return None
-    return lo + al.dest_start, lo + al.dest_end
+    order = {attr: i for i, attr in enumerate(reversed(_ATTRS))}  # bold=0 outermost … mark innermost
+    opens: dict[int, list[str]] = {}
+    closes: dict[int, list[str]] = {}
+    for a, b, attr in ranges:
+        opens.setdefault(a, []).append(attr)
+        closes.setdefault(b, []).append(attr)
+    out: list[str] = []
+    for i in range(len(vlm_text) + 1):
+        if i in closes:
+            out.extend(_CLOSE[t] for t in sorted(closes[i], key=lambda t: -order[t]))
+        if i in opens:
+            out.extend(_OPEN[t] for t in sorted(opens[i], key=lambda t: order[t]))
+        if i < len(vlm_text):
+            out.append(vlm_text[i])
+    return "".join(out)
 
 
 def render_blocks(

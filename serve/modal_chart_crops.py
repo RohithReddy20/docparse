@@ -52,7 +52,25 @@ _PLACEHOLDER_RE = re.compile(r"^!\[([A-Za-z_\-]+?)(\+?)\]\(\s*(\d+)\s*,\s*(\d+)\
 
 def chart_blocks(raw_text: str) -> list[list[int]]:
     """bboxes (0–1000 grid) of chart blocks, and image blocks that carry a table."""
-    from docparse.providers.lightonocr3 import parse_grounding
+    import re as _re
+
+    _PH = _re.compile(r"^!\[([A-Za-z_\-]+?)(\+?)\]\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)[ \t]?(.*)$")
+
+    def parse_grounding(text):  # minimal copy of docparse.providers.lightonocr3.parse_grounding (no parse_bench import)
+        blocks, cur, buf = [], None, []
+        for line in text.splitlines():
+            m = _PH.match(line.strip())
+            if m:
+                if cur is not None:
+                    cur["text"] = "\n".join(buf).strip(); blocks.append(cur)
+                label, cont, x1, y1, x2, y2, rest = m.groups()
+                cur = {"label": label.lower(), "continuation": cont == "+", "bbox": [int(x1), int(y1), int(x2), int(y2)]}
+                buf = [rest] if rest else []
+            elif cur is not None:
+                buf.append(line)
+        if cur is not None:
+            cur["text"] = "\n".join(buf).strip(); blocks.append(cur)
+        return blocks
 
     out: list[list[int]] = []
     for b in parse_grounding(raw_text):
