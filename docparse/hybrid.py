@@ -282,6 +282,55 @@ def transfer_styles(vlm_text: str, lines: list[Line]) -> str:
     return "".join(out)
 
 
+_VLM_BULLET_RE = re.compile(r"^\s*(?:[-*\u2022\u25aa\u25cf\u2013]|\d{1,3}[.)]|[a-zA-Z][.)])\s+\S", re.M)
+
+
+def _vlm_list_items(vlm: str) -> list[str] | None:
+    """Lines of a VLM block that are markdown list items (each is its own element)."""
+    lines = [ln for ln in vlm.splitlines() if ln.strip()]
+    if len(lines) < 2 or sum(bool(_VLM_BULLET_RE.match(ln)) for ln in lines) < max(2, int(0.8 * len(lines))):
+        return None
+    items: list[str] = []
+    for ln in lines:
+        if _VLM_BULLET_RE.match(ln) or not items:
+            items.append(ln.strip())
+        else:
+            items[-1] += " " + ln.strip()  # wrapped continuation
+    return items
+
+
+def _split_vlm_items(block: dict[str, Any], items: list[str], lines: list[Line], tl: TextLayerPage) -> list[dict[str, Any]]:
+    """One block per list item; bbox from the layer lines that match the item text."""
+    out: list[dict[str, Any]] = []
+    pool = list(lines)
+    for item in items:
+        body = re.sub(r"^\s*(?:[-*\u2022\u25aa\u25cf\u2013]|\d{1,3}[.)]|[a-zA-Z][.)])\s+", "", item)
+        matched: list[Line] = []
+        for ln in pool:
+            t = ln.text.strip()
+            if len(t) >= 3 and fuzz.partial_ratio(t, body) >= 85:
+                matched.append(ln)
+        for ln in matched:
+            pool.remove(ln)
+        nb = dict(block)
+        nb.update(text=transfer_styles(item, matched) if matched else item, source="vlm-item")
+        if matched:
+            nb["bbox"] = _lines_bbox1000(matched, tl)
+        out.append(nb)
+    return out
+
+
+def _align_slice(text: str, query: str, lo: int) -> tuple[int, int] | None:
+    """Locate ``query`` (a layer group's text) inside ``text`` at or after ``lo``."""
+    q = re.sub(r"\s+", " ", query).strip()
+    if len(q) < 3 or lo >= len(text):
+        return None
+    al = fuzz.partial_ratio_alignment(q, text[lo:])
+    if al is None or al.score < 80:
+        return None
+    return lo + al.dest_start, lo + al.dest_end
+
+
 def render_blocks(
     block: dict[str, Any], tl: TextLayerPage, claimed: set[int] | None = None
 ) -> list[dict[str, Any]] | None:
