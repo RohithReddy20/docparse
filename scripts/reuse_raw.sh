@@ -19,5 +19,5 @@ m["pipeline"] = get_pipeline(dst).model_dump()
 json.dump(m, open(f"output/{dst}/_metadata.json", "w"), indent=2)
 PY
 uv run docparse inference renormalize "output/$DST" --pipeline_name "$DST" --force | grep -E "Success|Errors"
-uv run docparse run "$DST" --test --skip_inference > "output/$DST/_eval.log" 2>&1 || true
+uv run docparse run "$DST" ${TEST_FLAG---test} --skip_inference > "output/$DST/_eval.log" 2>&1 || true
 echo "failed examples: $(grep -cE FAILED "output/$DST/_eval.log" || true)"

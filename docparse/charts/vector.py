@@ -62,6 +62,27 @@ class Poly:
     points: list[tuple[float, float]]
     color: Color
     bbox: list[float] = field(default_factory=list)
+    width: float = 1.0
+    dash: str = ""
+
+    @property
+    def style(self) -> tuple:
+        return (self.color, round(self.width, 1), self.dash)
+
+
+@dataclass
+class Slice:
+    cx: float
+    cy: float
+    a0: float  # start angle, degrees (0 = +x, counter-clockwise in page space)
+    a1: float  # end angle
+    sweep: float  # degrees
+    radius: float
+    fill: Color
+
+    @property
+    def mid(self) -> float:
+        return (self.a0 + self.sweep / 2) % 360
 
 
 @dataclass
@@ -120,6 +141,136 @@ def page_primitives(page: pymupdf.Page) -> tuple[list[Bar], list[Poly]]:
     return bars, polys
 
 
+def _angle(cx: float, cy: float, x: float, y: float) -> float:
+    return math.degrees(math.atan2(-(y - cy), x - cx)) % 360
+
+
+def page_slices(page: pymupdf.Page) -> list[Slice]:
+    """Pie / donut slices: a filled path made of straight radii meeting at a common
+    centre plus a chain of Bézier arcs. The sweep is read from the arc points."""
+    out: list[Slice] = []
+    for dr in page.get_drawings():
+        fill = _rgb(dr.get("fill"))
+        items = dr.get("items", [])
+        curves = [it for it in items if it[0] == "c"]
+        lines = [it for it in items if it[0] == "l"]
+        if fill is None or not curves or _is_grey(fill) and min(fill) > 0.85:
+            continue
+        # arc chain endpoints and sample points (curve start/end/control)
+        arc_pts = [(it[1].x, it[1].y) for it in curves] + [(it[4].x, it[4].y) for it in curves]
+        # centre: endpoint shared by the straight segments (or the arc's two ends' radii)
+        cands = [(it[1].x, it[1].y) for it in lines] + [(it[2].x, it[2].y) for it in lines]
+        centre = None
+        for c in cands:
+            if sum(1 for o in cands if abs(o[0] - c[0]) <= 0.6 and abs(o[1] - c[1]) <= 0.6) >= 2:
+                centre = c
+                break
+        if centre is None:
+            continue
+        cx, cy = centre
+        radii = [math.hypot(x - cx, y - cy) for x, y in arc_pts]
+        if not radii or max(radii) < 8:
+            continue
+        r = max(radii)
+        # keep arc points on the outer rim (donuts also carry an inner arc)
+        rim = [(x, y) for (x, y), rr in zip(arc_pts, radii) if rr >= 0.75 * r]
+        angs = sorted(_angle(cx, cy, x, y) for x, y in rim)
+        if len(angs) < 2:
+            continue
+        # the slice spans the arc that contains the sampled rim points: find the
+        # largest angular gap between consecutive samples; the slice is the rest
+        gaps = [(angs[(i + 1) % len(angs)] - angs[i]) % 360 for i in range(len(angs))]
+        k = max(range(len(gaps)), key=lambda i: gaps[i])
+        sweep = 360 - gaps[k]
+        a0 = angs[(k + 1) % len(angs)]
+        if sweep < 1 or sweep > 359:
+            continue
+        out.append(Slice(cx, cy, a0, (a0 + sweep) % 360, sweep, r, fill))
+    return out
+
+
+def pie_tables(slices: list[Slice], spans: list[Span], legend: dict[Color, str], title: str | None) -> list[ChartTable]:
+    """Group slices by centre; one table per pie with category, printed value
+    (or the geometric share) per slice. Labels are read along each slice's
+    bisector (inside the slice or just past the rim); wrapped label lines are
+    joined; the text line above the pie is its title."""
+    groups: list[list[Slice]] = []
+    for sl in slices:
+        for g in groups:
+            if abs(g[0].cx - sl.cx) <= 3 and abs(g[0].cy - sl.cy) <= 3:
+                g.append(sl)
+                break
+        else:
+            groups.append([sl])
+    tables: list[ChartTable] = []
+    text_spans = [sp for sp in spans if sp.text.strip() and not is_numeric(sp.text) and not _FURNITURE_RE.match(sp.text.strip())]
+    labels = _merge_wrapped_labels(text_spans)
+    for g in groups:
+        total = sum(sl.sweep for sl in g)
+        if len(g) < 2 or not (300 <= total <= 375):
+            continue
+        cx, cy, r = g[0].cx, g[0].cy, max(sl.radius for sl in g)
+        rows: list[list[str]] = []
+        used_labels: set[str] = set()
+        for sl in sorted(g, key=lambda sl: -sl.sweep):
+            label = legend.get(sl.fill)
+            best_t: tuple[float, str] | None = None
+            best_v: tuple[float, str] | None = None
+            for b, t in labels:
+                if re.search(r"\btotal\b", t, re.I):
+                    continue  # "Total: $750,000" is the pie's title line
+                if b[3] <= cy - r and not re.search(r"\d", t):
+                    continue  # a line above the pie with no number is its title
+                scx, scy = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
+                dist = math.hypot(scx - sl.cx, scy - sl.cy)
+                if dist > 2.0 * sl.radius or dist < 0.15 * sl.radius:
+                    continue
+                ang = _angle(sl.cx, sl.cy, scx, scy)
+                diff = min((ang - sl.mid) % 360, (sl.mid - ang) % 360)
+                if diff > max(sl.sweep / 2, 8):
+                    continue
+                score = diff + 4 * dist / sl.radius
+                m = re.match(r"^(.*?)[\s:–-]*([-−]?\d[\d.,]*\s*%?)$", t)
+                if m and len(m.group(1).strip()) >= 2:
+                    t_label, t_val = m.group(1).strip(), clean_number(m.group(2))
+                    if best_v is None or score < best_v[0]:
+                        best_v = (score, t_val)
+                    t = t_label
+                if len(t) <= 80 and (best_t is None or score < best_t[0]):
+                    best_t = (score, t)
+            for sp in spans:
+                t = sp.text.strip()
+                if not is_numeric(t):
+                    continue
+                scx, scy = _span_center(sp)
+                dist = math.hypot(scx - sl.cx, scy - sl.cy)
+                if dist > 2.4 * sl.radius or dist < 0.1 * sl.radius:
+                    continue
+                ang = _angle(sl.cx, sl.cy, scx, scy)
+                diff = min((ang - sl.mid) % 360, (sl.mid - ang) % 360)
+                if diff > max(sl.sweep / 2, 8):
+                    continue
+                score = diff + 4 * dist / sl.radius
+                if best_v is None or score < best_v[0]:
+                    best_v = (score, clean_number(t))
+            if label is None and best_t is not None:
+                label = best_t[1]
+            value = best_v[1] if best_v is not None else _round_value(100 * sl.sweep / total, 0.5)
+            if label:
+                rows.append([label, value])
+                used_labels.add(label)
+        # title: nearest unused text line above the pie, overlapping it horizontally
+        above = [
+            (b, t) for b, t in labels
+            if b[3] <= cy - r + 2 and cy - r - b[3] <= 80 and min(b[2], cx + r) - max(b[0], cx - r) > 0
+            and not any(t == u or t.startswith(u) for u in used_labels)
+        ]
+        pie_title = title or (max(above, key=lambda bt: bt[0][3])[1] if above else "")
+        if len(rows) >= 2:
+            tables.append(ChartTable(header=[pie_title, "Share (%)"], rows=rows, confidence=0.5, source="vector-pie", caption=pie_title))
+    return tables
+
+
 def page_primitives_full(page: pymupdf.Page) -> tuple[list[Bar], list[Poly], list[list[float]]]:
     """Bars, coloured polylines, and grey frame/grid path bboxes (plot-area anchors)."""
     bars: list[Bar] = []
@@ -141,6 +292,10 @@ def page_primitives_full(page: pymupdf.Page) -> tuple[list[Bar], list[Poly], lis
                     continue
                 if _is_grey(fill) and (w > 200 and h > 200):
                     continue  # background panel
+                if min(fill[:3]) >= 0.97 and w > 40 and h > 40:
+                    continue  # white plot background / card
+                if min(fill[:3]) >= 0.9 and ((w > 60 and h > 20) or (h > 60 and w > 20)) and w * h > 3000:
+                    continue  # pale title band / panel background
                 bars.append(Bar(x0, y0, x1, y1, fill))
         elif color is not None and _is_grey(color):
             r = dr["rect"]
@@ -157,10 +312,41 @@ def page_primitives_full(page: pymupdf.Page) -> tuple[list[Bar], list[Poly], lis
                     if not pts:
                         pts.append((it[1].x, it[1].y))
                     pts.append((it[4].x, it[4].y))
-            if len(pts) >= 3:
+            if len(pts) >= 2:
                 r = dr["rect"]
-                polys.append(Poly(pts, color, [r.x0, r.y0, r.x1, r.y1]))
-    return bars, polys, frames
+                polys.append(Poly(pts, color, [r.x0, r.y0, r.x1, r.y1], float(dr.get("width") or 1.0), str(dr.get("dashes") or "")))
+    return bars, _chain(polys), frames
+
+
+def _chain(polys: list[Poly]) -> list[Poly]:
+    """Lines are often emitted one segment per drawing (dashed series especially).
+    Join consecutive same-style segments whose endpoints meet into one polyline."""
+    by_style: dict[tuple, list[Poly]] = defaultdict(list)
+    for p in polys:
+        by_style[p.style].append(p)
+    out: list[Poly] = []
+    for style, group in by_style.items():
+        group.sort(key=lambda p: (min(x for x, _ in p.points), min(y for _, y in p.points)))
+        chains: list[Poly] = []
+        for p in group:
+            attached = False
+            for c in chains:
+                tail = c.points[-1]
+                head = p.points[0]
+                if abs(tail[0] - head[0]) <= 0.6 and abs(tail[1] - head[1]) <= 0.6:
+                    c.points.extend(p.points[1:])
+                    c.bbox = _union(c.bbox, p.bbox)
+                    attached = True
+                    break
+                if abs(c.points[0][0] - p.points[-1][0]) <= 0.6 and abs(c.points[0][1] - p.points[-1][1]) <= 0.6:
+                    c.points = p.points[:-1] + c.points
+                    c.bbox = _union(c.bbox, p.bbox)
+                    attached = True
+                    break
+            if not attached:
+                chains.append(Poly(list(p.points), p.color, list(p.bbox), p.width, p.dash))
+        out.extend(chains)
+    return out
 
 
 # --------------------------------------------------------------------------- regions
@@ -232,10 +418,39 @@ def _plot_cores(page: pymupdf.Page, tl: TextLayerPage) -> list[tuple[list[float]
     boxes += [p.bbox for p in polys if (p.bbox[2] - p.bbox[0]) > 20 or (p.bbox[3] - p.bbox[1]) > 20]
     if not boxes:
         return []
-    # grey gridlines/axes anchor the plot area but never form a chart on their own
-    anchored = [f for f in frames if any(_near(f, b, CORE_GAP) for b in boxes)]
+    # grey gridlines/axes extend a plot area; they bridge two bar clusters only when
+    # one frame encloses both (positive and negative bars of one chart), never
+    # side-by-side panels sharing a page-wide background.
+    cores0 = _cluster(boxes, CORE_GAP)
+
+    def inside(a: list[float], f: list[float]) -> bool:
+        ix = max(0.0, min(a[2], f[2]) - max(a[0], f[0]))
+        iy = max(0.0, min(a[3], f[3]) - max(a[1], f[1]))
+        return ix * iy >= 0.8 * max(1e-6, (a[2] - a[0]) * (a[3] - a[1]))
+
+    merged = True
+    while merged and len(cores0) > 1:
+        merged = False
+        for i in range(len(cores0)):
+            for j in range(i + 1, len(cores0)):
+                a, b = cores0[i], cores0[j]
+                wide = max(a[2] - a[0], b[2] - b[0])
+                if any(inside(a, f) and inside(b, f) and (f[2] - f[0]) <= 1.6 * wide for f in frames):
+                    cores0[i] = _union(a, b)
+                    del cores0[j]
+                    merged = True
+                    break
+            if merged:
+                break
+    extended: list[list[float]] = []
+    for core in cores0:
+        ext = list(core)
+        for f in frames:
+            if _near(f, core, 2.0) and not any(_near(f, o, 2.0) for o in cores0 if o is not core):
+                ext = _union(ext, f)
+        extended.append(ext)
     out: list[tuple[list[float], list[float]]] = []
-    for core in _cluster(boxes + anchored, CORE_GAP):
+    for core in extended:
         n_bars = sum(1 for b in big if _near(core, [b.x0, b.y0, b.x1, b.y1], 0))
         n_poly = sum(1 for p in polys if _near(core, p.bbox, 0))
         if n_bars < 2 and n_poly < 1:
@@ -246,8 +461,7 @@ def _plot_cores(page: pymupdf.Page, tl: TextLayerPage) -> list[tuple[list[float]
             for sp in ln.spans:
                 if not sp.text.strip() or (sp.bbox[2] - sp.bbox[0]) > 1.2 * cw:
                     continue  # page-wide titles/captions are not chart furniture
-                cx, cy = _span_center(sp)
-                if core[0] - SPAN_GAP <= cx <= core[2] + SPAN_GAP and core[1] - SPAN_GAP <= cy <= core[3] + SPAN_GAP:
+                if _dist(core, sp) <= SPAN_GAP or _near(core, list(sp.bbox), SPAN_GAP * 0.5):
                     grown = _union(grown, list(sp.bbox))
         if (grown[2] - grown[0]) < 40 or (grown[3] - grown[1]) < 25:
             continue
@@ -319,14 +533,15 @@ def detect_axes(spans: list[Span]) -> list[Axis]:
     return axes
 
 
-def _round_value(v: float, step: float) -> str:
+def _round_value(v: float, step: float, fine: bool = False) -> str:
     """Round a geometric estimate the way a human reads an axis: whole units when
-    ticks are ≥2 apart, otherwise a tenth of the tick step."""
+    ticks are ≥2 apart, otherwise a tenth of the tick step. ``fine`` (line charts,
+    whose annotated values carry a decimal) keeps a twentieth of the step."""
     if step <= 0:
         return f"{v:.2f}"
-    if step >= 2:
+    if step >= 2 and not fine:
         return str(int(round(v))) if round(v) != 0 else "0"
-    decimals = max(0, min(4, int(math.ceil(-math.log10(step / 10)))))
+    decimals = max(0, min(4, int(math.ceil(-math.log10(step / (20 if fine else 10))))))
     s = f"{v:.{decimals}f}"
     if "." in s:
         s = s.rstrip("0").rstrip(".")
@@ -336,10 +551,17 @@ def _round_value(v: float, step: float) -> str:
 # --------------------------------------------------------------------------- legend / series
 
 
-def _legend(bars: list[Bar], polys: list[Poly], spans: list[Span]) -> tuple[dict[Color, str], set[int]]:
-    """Series name per colour from legend swatches, plus the ids of swatch bars."""
+def _legend(
+    bars: list[Bar], polys: list[Poly], spans: list[Span], near: list[float] | None = None
+) -> tuple[dict[Color, str], set[int]]:
+    """Series name per colour from legend swatches, plus the ids of swatch bars.
+    With ``near``, only swatches within LEGEND_REACH of that box count (a page
+    with several charts reuses colours across legends)."""
     names: dict[Color, str] = {}
     swatches: set[int] = set()
+    if near is not None:
+        bars = [b for b in bars if _near(near, [b.x0, b.y0, b.x1, b.y1], LEGEND_REACH)]
+        polys = [p for p in polys if _near(near, p.bbox, LEGEND_REACH)]
     # legend entries are words, or years ("2022" / "2024" series)
     texts = [
         s for s in spans
@@ -366,11 +588,127 @@ def _legend(bars: list[Bar], polys: list[Poly], spans: list[Span]) -> tuple[dict
                     names[b.fill] = name
     for p in polys:
         w, h = p.bbox[2] - p.bbox[0], p.bbox[3] - p.bbox[1]
-        if w <= 30 and h <= 4 and len(p.points) <= 6:
+        if 4 <= w <= 30 and h <= 4 and len(p.points) <= 6:
             name = beside(p.bbox[2], (p.bbox[1] + p.bbox[3]) / 2, 6)
             if name and p.color not in names:
                 names[p.color] = name
     return names, swatches
+
+
+
+def _infer_zero(bars: list[Bar], horizontal: bool) -> float | None:
+    """Bars grow from a common baseline: the most shared edge coordinate (positive
+    bars end on it, negative bars start on it)."""
+    edges: dict[float, int] = defaultdict(int)
+    for b in bars:
+        for e in ((b.x0, b.x1) if horizontal else (b.y0, b.y1)):
+            edges[round(e, 0)] += 1
+    if not edges:
+        return None
+    coord, n = max(edges.items(), key=lambda kv: kv[1])
+    if n >= 2 and n >= 0.4 * len(bars):
+        return float(coord)
+    return None
+
+
+def _merge_wrapped_labels(spans: list[Span]) -> list[tuple[list[float], str]]:
+    """Short text lines that wrap (same left edge, next line within a third of a
+    line height) read as one label. Merging runs per left-edge column so labels
+    of another column printed between two wrapped lines do not break the join."""
+    items = sorted(((list(s.bbox), s.text.strip()) for s in spans if s.text.strip()), key=lambda t: (t[0][0], t[0][1]))
+    columns: list[list[tuple[list[float], str]]] = []
+
+    def same_column(a: list[float], b: list[float]) -> bool:  # left-aligned or centred
+        return abs(a[0] - b[0]) <= 8 or abs((a[0] + a[2]) - (b[0] + b[2])) / 2 <= 8
+
+    for box, text in items:
+        for col in columns:
+            if any(same_column(c[0], box) for c in col[-2:]):
+                col.append((box, text))
+                break
+        else:
+            columns.append([(box, text)])
+    out: list[tuple[list[float], str]] = []
+    for col in columns:
+        col.sort(key=lambda t: t[0][1])
+        merged: list[tuple[list[float], str]] = []
+        last_h = 1.0
+        for box, text in col:
+            h = max(box[3] - box[1], 1.0)
+            if merged:
+                pb, pt = merged[-1]
+                if -0.35 * last_h <= box[1] - pb[3] <= 0.3 * last_h:
+                    merged[-1] = (_union(pb, box), pt + " " + text)
+                    last_h = h
+                    continue
+            merged.append((box, text))
+            last_h = h
+        out.extend(merged)
+    out.sort(key=lambda t: (t[0][1], t[0][0]))
+    return out
+
+
+def _side_labels(spans: list[Span], plot: list[float], exclude: set[int]) -> list[tuple[list[float], str]]:
+    """Non-numeric labels left/right of the plot (legend entries without swatches,
+    sign labels of diverging charts), wrapped lines merged."""
+    pool = [
+        s for s in spans
+        if s.text.strip() and not is_numeric(s.text) and id(s) not in exclude
+        and not _FURNITURE_RE.match(s.text.strip()) and len(s.text.strip()) <= 60
+        and (s.bbox[2] <= plot[0] + 2 or s.bbox[0] >= plot[2] - 2)
+        and s.bbox[3] >= plot[1] - 10 and s.bbox[1] <= plot[3] + 40
+        and (s.bbox[2] - s.bbox[0]) <= max(0.6 * (plot[2] - plot[0]), 60.0)
+    ]
+    return _merge_wrapped_labels(pool)
+
+
+def _sign_legend(spans: list[Span], plot: list[float], zero: float, horizontal: bool, exclude: set[int]) -> tuple[str, str] | None:
+    """Diverging charts label the two sides of the baseline ('Favorable attitude' /
+    'Unfavorable attitude') instead of drawing swatches."""
+    if horizontal:
+        return None
+    labels = _side_labels(spans, plot, exclude)
+    for side in (
+        [t for t in labels if t[0][2] <= plot[0] + 2],
+        [t for t in labels if t[0][0] >= plot[2] - 2],
+    ):
+        above = [t for b, t in side if (b[1] + b[3]) / 2 < zero - 2]
+        below = [t for b, t in side if (b[1] + b[3]) / 2 > zero + 2]
+        if len(above) == 1 and len(below) == 1:
+            return above[0], below[0]
+    return None
+
+
+def _ordinal_legend(spans: list[Span], plot: list[float], colors: list[Color], exclude: set[int]) -> list[str] | None:
+    """Legend entries printed as a stack of short labels beside the plot with no
+    swatch primitives: map them to series colours in order. The legend is the
+    side whose label count equals the series count (categories fill the other)."""
+    if len(colors) < 2:
+        return None
+    labels = _side_labels(spans, plot, exclude)
+    left = [t for t in labels if t[0][2] <= plot[0] + 2]
+    right = [t for t in labels if t not in left]
+    for side in (right, left):
+        if len(side) == len(colors):
+            side.sort(key=lambda t: (t[0][1], t[0][0]))
+            return [t for _b, t in side]
+    return None
+
+
+def _panel_title(spans: list[Span], core: list[float], reach: float = 40.0) -> str | None:
+    """Bold / short text line just above a plot core (a small-multiple's name)."""
+    cands = [
+        s for s in spans
+        if s.text.strip() and not is_numeric(s.text) and not _FURNITURE_RE.match(s.text.strip())
+        and 0 <= core[1] - s.bbox[3] <= reach
+        and min(s.bbox[2], core[2]) - max(s.bbox[0], core[0]) >= 0.5 * (s.bbox[2] - s.bbox[0])
+        and len(s.text.strip()) <= 60
+    ]
+    if not cands:
+        return None
+    best = max(cands, key=lambda s: s.bbox[3])
+    line = sorted((s for s in cands if abs(s.bbox[1] - best.bbox[1]) <= 2), key=lambda s: s.bbox[0])
+    return " ".join(s.text.strip() for s in line)
 
 
 # --------------------------------------------------------------------------- reconstruction
@@ -473,7 +811,7 @@ def _label_hit(bar: Bar, orient: str, s: Span, zero: float | None) -> bool:
     if bar.y0 <= cy <= bar.y1 and bar.h >= 12:  # printed inside the bar
         return True
     if zero is not None and bar.y0 >= zero - ZERO_TOL:  # negative bar (below zero), label beneath
-        return bar.y1 - max(6, bar.h * 0.35) <= cy <= bar.y1 + 14
+        return bar.y1 - max(6, bar.h * 0.35) <= cy <= bar.y1 + 18
     return bar.y0 - 14 <= cy <= bar.y0 + max(6, bar.h * 0.35)
 
 
@@ -498,7 +836,26 @@ def _bar_value(bar: Bar, axis: Axis) -> float:
     return v1 - v0  # stacked segment
 
 
-def reconstruct_region(region: ChartRegion, bars: list[Bar] | None = None, polys: list[Poly] | None = None) -> list[ChartTable]:
+def _drop_containers(big: list[Bar]) -> list[Bar]:
+    """Filled rects enclosing several bars are backgrounds, not bars."""
+    out: list[Bar] = []
+    for b in big:
+        inside = sum(
+            1 for o in big
+            if o is not b and o.x0 >= b.x0 - 0.5 and o.x1 <= b.x1 + 0.5 and o.y0 >= b.y0 - 0.5 and o.y1 <= b.y1 + 0.5
+        )
+        if inside < 3:
+            out.append(b)
+    return out
+
+
+def reconstruct_region(
+    region: ChartRegion,
+    bars: list[Bar] | None = None,
+    polys: list[Poly] | None = None,
+    page_legend: dict[Color, str] | None = None,
+    panel: str | None = None,
+) -> list[ChartTable]:
     if bars is None or polys is None:
         return []
     spans = region.spans
@@ -506,16 +863,22 @@ def reconstruct_region(region: ChartRegion, bars: list[Bar] | None = None, polys
     axes = [a for a in all_axes if not _is_categorical(a.values, a.step)]
     cat_axes = [a for a in all_axes if _is_categorical(a.values, a.step)]
     legend, swatch_ids = _legend(bars, polys, spans)
-    big = [b for b in bars if id(b) not in swatch_ids and (b.w >= 2 or b.h >= 2)]
+    for c, n in (page_legend or {}).items():
+        legend[c] = n  # caller resolved colour collisions by proximity
+    big = _drop_containers([b for b in bars if id(b) not in swatch_ids and (b.w >= 2 or b.h >= 2)])
     tables: list[ChartTable] = []
 
     if big:
         horizontal = sum(1 for b in big if b.w > b.h) >= len(big) / 2
+        # bullets / tick marks are far thinner than the bars
+        thick = sorted((b.h if horizontal else b.w) for b in big)[len(big) // 2]
+        big = [b for b in big if (b.h if horizontal else b.w) >= 0.4 * thick] or big
         want = "x" if horizontal else "y"
         plot = [min(b.x0 for b in big), min(b.y0 for b in big), max(b.x1 for b in big), max(b.y1 for b in big)]
         cand = [a for a in axes if a.orient == want and _outside(a, plot)]
         axis = max(cand, key=lambda a: len(a.coords)) if cand else None
-        labelled = sum(1 for b in big if _printed_label(b, want, spans, None) is not None)
+        zero = axis.coord(0.0) if axis is not None else _infer_zero(big, horizontal)
+        labelled = sum(1 for b in big if _printed_label(b, want, spans, zero) is not None)
         if axis is not None or labelled >= 0.6 * len(big):
             exclude = {id(sp) for sp in spans if sp.text.strip() in legend.values()}
             for other in axes:  # tick labels are not categories
@@ -523,7 +886,7 @@ def reconstruct_region(region: ChartRegion, bars: list[Bar] | None = None, polys
             # printed data labels are not categories either
             for b in big:
                 for sp in spans:
-                    if is_numeric(sp.text) and _label_hit(b, want, sp, None):
+                    if is_numeric(sp.text) and _label_hit(b, want, sp, zero):
                         exclude.add(id(sp))
             thickness = sorted((b.h if horizontal else b.w) for b in big)[len(big) // 2]
             groups: list[float] = []
@@ -531,18 +894,31 @@ def reconstruct_region(region: ChartRegion, bars: list[Bar] | None = None, polys
                 c = b.cy if horizontal else b.cx
                 if not groups or c - groups[-1] > thickness * 1.2:
                     groups.append(c)
-            cats = _categories(spans, want, plot, exclude, n_groups=len(groups))
-            year_axis = next((a for a in cat_axes if a.orient == ("y" if horizontal else "x")), None)
-            zero = axis.coord(0.0) if axis is not None else None
             colors: list[Color] = []
-            for b in big:
+            for b in sorted(big, key=lambda b: ((b.cy, b.x0) if horizontal else (b.cx, -b.y1))):
                 if b.fill not in colors:
                     colors.append(b.fill)
             # order series as in the legend when known
             colors.sort(key=lambda c: (c not in legend, list(legend).index(c) if c in legend else 0))
-            series = [legend.get(c, f"Series {i + 1}") for i, c in enumerate(colors)]
-            if len(series) == 1 and colors[0] not in legend:
-                series = [_chart_title(spans, plot) or "Value"]
+            sign_names: tuple[str, str] | None = None
+            if not any(c in legend for c in colors):
+                if zero is not None:
+                    sign_names = _sign_legend(spans, plot, zero, horizontal, exclude)
+                if not sign_names:
+                    ordinal = _ordinal_legend(spans, plot, colors, exclude)
+                    if ordinal:
+                        legend.update(zip(colors, ordinal))
+            exclude |= {id(sp) for sp in spans if sp.text.strip() in legend.values()}
+            if sign_names:
+                exclude |= {id(sp) for sp in spans if any(sp.text.strip() in n for n in sign_names)}
+            cats = _categories(spans, want, plot, exclude, n_groups=len(groups))
+            year_axis = next((a for a in cat_axes if a.orient == ("y" if horizontal else "x")), None)
+            if sign_names:
+                series = list(sign_names)
+            else:
+                series = [legend.get(c, f"Series {i + 1}") for i, c in enumerate(colors)]
+                if len(series) == 1 and colors[0] not in legend:
+                    series = [_chart_title(spans, plot) or "Value"]
             rows: dict[str, list[str]] = {}
             order: list[str] = []
             for b in sorted(big, key=lambda b: (b.cy if horizontal else b.cx)):
@@ -563,20 +939,42 @@ def reconstruct_region(region: ChartRegion, bars: list[Bar] | None = None, polys
                 if cat not in rows:
                     rows[cat] = [""] * len(series)
                     order.append(cat)
-                ci = colors.index(b.fill)
+                if sign_names:
+                    try:
+                        neg = float(val) < 0
+                    except ValueError:
+                        neg = (b.y0 >= zero - ZERO_TOL) if zero is not None else False
+                    ci = 1 if neg else 0
+                else:
+                    ci = colors.index(b.fill)
                 if rows[cat][ci] == "":
                     rows[cat][ci] = val
                 else:  # same colour twice in a category: stacked/grouped w/o colour difference
                     rows[cat].append(val)
+            title = _chart_title(spans, plot) or ""
+            cap = _caption(title, panel)
+            pre = f"{panel} – " if panel else ""
             tables.append(
-                ChartTable(header=[""] + series, rows=[[c] + rows[c] for c in order], confidence=0.6, source="vector")
+                ChartTable(header=[title] + series, rows=[[pre + c] + rows[c] for c in order], confidence=0.6, source="vector", caption=cap)
             )
 
     # line series
     y_axes = [a for a in axes if a.orient == "y"]
     if polys and y_axes:
         axis = max(y_axes, key=lambda a: len(a.coords))
-        lines = [p for p in polys if (p.bbox[2] - p.bbox[0]) > 30 and len(p.points) >= 3]
+        chains = [p for p in polys if (p.bbox[2] - p.bbox[0]) > 30 and len(p.points) >= 3]
+        # one series per stroke style; a series may be drawn as several chains
+        by_style: dict[tuple, list[Poly]] = {}
+        for p in chains:
+            by_style.setdefault(p.style, []).append(p)
+        lines = [
+            Poly(
+                sorted(pt for c in group for pt in c.points), group[0].color,
+                [min(c.bbox[0] for c in group), min(c.bbox[1] for c in group), max(c.bbox[2] for c in group), max(c.bbox[3] for c in group)],
+                group[0].width, group[0].dash,
+            )
+            for group in by_style.values()
+        ]
         if lines:
             plot = [
                 min(p.bbox[0] for p in lines),
@@ -591,16 +989,26 @@ def reconstruct_region(region: ChartRegion, bars: list[Bar] | None = None, polys
             if cats:
                 series = [legend.get(p.color) or _end_label(p, spans) or f"Line {i + 1}" for i, p in enumerate(lines)]
                 rows_l: list[list[str]] = []
+                pre = f"{panel} – " if panel else ""
                 for cx, name in cats:
                     if cx < plot[0] - 10 or cx > plot[2] + 10:
                         continue
-                    row = [name]
+                    row = [pre + name]
                     for p in lines:
-                        row.append(_round_value(axis.value(_sample(p.points, cx)), axis.step))
+                        row.append(_round_value(axis.value(_sample(p.points, cx)), axis.step, fine=True))
                     rows_l.append(row)
                 if rows_l:
-                    tables.append(ChartTable(header=[""] + series, rows=rows_l, confidence=0.4, source="vector-line"))
+                    title = _chart_title(spans, plot) or ""
+                    cap = _caption(title, panel)
+                    tables.append(ChartTable(header=[title] + series, rows=rows_l, confidence=0.4, source="vector-line", caption=cap))
     return tables
+
+
+def _caption(title: str, panel: str | None) -> str:
+    parts = [t for t in (title, panel) if t]
+    if len(parts) == 2 and parts[0].strip().lower() == parts[1].strip().lower():
+        parts = parts[:1]
+    return " – ".join(parts)
 
 
 def _chart_title(spans: list[Span], plot: list[float]) -> str | None:
@@ -609,6 +1017,10 @@ def _chart_title(spans: list[Span], plot: list[float]) -> str | None:
         s for s in spans
         if s.text.strip() and not is_numeric(s.text) and not _FURNITURE_RE.match(s.text.strip())
         and s.bbox[3] <= plot[1] + 2 and len(s.text.strip()) >= 3
+        and (
+            min(s.bbox[2], plot[2]) - max(s.bbox[0], plot[0]) >= 0.5 * (s.bbox[2] - s.bbox[0])
+            or (s.bbox[2] <= plot[2] and plot[0] - s.bbox[2] <= 80)  # left-aligned title outside the bars
+        )
     ]
     if not cands:
         return None
@@ -647,9 +1059,14 @@ def _sample(points: list[tuple[float, float]], x: float) -> float:
 
 def reconstruct_page(page: pymupdf.Page, tl: TextLayerPage) -> list[ChartTable]:
     bars, polys, _frames = page_primitives_full(page)
-    swatches = _page_swatches(bars, polys, tl)
+    all_spans = [sp for ln in tl.lines for sp in ln.spans]
+    page_legend, swatches = _legend(bars, polys, all_spans)
     out: list[ChartTable] = []
+    slices = page_slices(page)
+    if slices:
+        out.extend(pie_tables(slices, all_spans, page_legend, None))
     cores = _plot_cores(page, tl)
+    multi = len(cores) >= 2
     for core, grown in cores:
         region = region_from_page(page, tl, grown, pad=0.0)
         others = [c for c, _g in cores if c is not core]
@@ -666,5 +1083,10 @@ def reconstruct_page(page: pymupdf.Page, tl: TextLayerPage) -> list[ChartTable]:
                         if sp not in region.spans and 0 <= sp.bbox[0] - b.x1 <= 16 and abs((sp.bbox[1] + sp.bbox[3]) / 2 - b.cy) <= max(b.h, 6)
                     )
         rp = [p for p in polys if _near(grown, p.bbox, 0.5)]
-        out.extend(reconstruct_region(region, rb, rp))
+        panel = _panel_title(all_spans, core) if multi else None
+        local, _ = _legend(bars, polys, all_spans, near=core)
+        legend = dict(local)
+        for c, n in page_legend.items():
+            legend.setdefault(c, n)
+        out.extend(reconstruct_region(region, rb, rp, page_legend=legend, panel=panel))
     return out

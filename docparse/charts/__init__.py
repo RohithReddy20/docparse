@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import html
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -51,10 +52,18 @@ class ChartTable:
     rows: list[list[str]]  # each row: [category, v1, v2, ...]
     confidence: float = 0.0
     source: str = ""
+    caption: str = ""  # chart / panel title; emitted as <caption> (a label source for the scorer)
+
+    def __post_init__(self) -> None:
+        # Ligatures ("Inﬂation") never match annotated labels: fold them.
+        self.header = [unicodedata.normalize("NFKC", h) for h in self.header]
+        self.rows = [[unicodedata.normalize("NFKC", c) for c in r] for r in self.rows]
+        self.caption = unicodedata.normalize("NFKC", self.caption)
 
     def to_html(self) -> str:
         """Series as a <th> header row, categories as <th> row headers: ParseBench
         associates a value's labels through the <th> chain of its row and column."""
+        cap = f"<caption>{html.escape(self.caption)}</caption>" if self.caption else ""
         head = "".join(f"<th>{html.escape(h)}</th>" for h in self.header)
         body = "".join(
             "<tr>" + "".join(
@@ -62,7 +71,7 @@ class ChartTable:
             ) + "</tr>"
             for r in self.rows
         )
-        return f"<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"
+        return f"<table>{cap}<thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"
 
 
 def is_numeric(text: str) -> bool:
