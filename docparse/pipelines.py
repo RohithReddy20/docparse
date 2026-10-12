@@ -13,6 +13,14 @@ _SPECS = [
         product_type=ProductType.PARSE,
         config={"prompt_mode": "grounding"},
     ),
+    # Same inference as lightonocr3_0_8b_grounding; normalization merges the PDF
+    # text layer (exact characters + styling) into the VLM's structure.
+    PipelineSpec(
+        pipeline_name="docparse_hybrid_v0",
+        provider_name="docparse_hybrid",
+        product_type=ProductType.PARSE,
+        config={"prompt_mode": "grounding"},
+    ),
     PipelineSpec(
         pipeline_name="lightonocr3_0_8b_md",
         provider_name="lightonocr3",

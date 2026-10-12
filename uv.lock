@@ -547,6 +547,7 @@ dependencies = [
     { name = "pillow" },
     { name = "pymupdf" },
     { name = "python-dotenv" },
+    { name = "rapidfuzz" },
 ]
 
 [package.dev-dependencies]
@@ -565,6 +566,7 @@ requires-dist = [
     { name = "pillow", specifier = ">=10.0" },
     { name = "pymupdf", specifier = ">=1.24" },
     { name = "python-dotenv", specifier = ">=1.0" },
+    { name = "rapidfuzz", specifier = ">=3.14.6" },
 ]
 
 [package.metadata.requires-dev]
