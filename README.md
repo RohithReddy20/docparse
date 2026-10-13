@@ -12,15 +12,16 @@ ceiling because they only look at pixels. 93% of ParseBench pages are born-digit
 (`scripts/analyze_text_layer.py`): the PDF text layer carries exact characters,
 bold/underline/strikethrough/highlight, font sizes (heading hierarchy), printed
 chart data labels, and the vector bars of 89% of chart pages. `docparse_hybrid_v0`
-uses the text layer for *content* and a 0.8B VLM for *structure*:
+combines native styling, text attribution and chart values with a 0.8B VLM for
+text and structure:
 
 ```
 PDF page ─┬─ text layer (PyMuPDF, CPU)  : spans + styling + drawings
           └─ LightOnOCR-3-0.8B grounding: block order, labels, bboxes, table/chart HTML
                      │
           reconcile  (docparse/hybrid.py)
-            • each VLM text block re-rendered from the text-layer lines it covers
-              (styling markers, heading levels from font size, exact digits)
+            • VLM characters retained; styling aligned from native spans,
+              heading levels from font context
             • merged blocks split on paragraph gaps / list items / bold lead lines
             • lines the VLM skipped recovered as blocks; header/footer/page-number
               lifted into structured fields
@@ -48,7 +49,8 @@ across variants; the hybrid also uses saved layout detections and chart crops):
 | docparse_hybrid_v0 (+ PP-DocLayout-V3 fusion) | 83.5 | 70.4 | 89.0 | 70.6 | 73.8 | 77.5 |
 | docparse_hybrid_v0 (+ Docling heron fusion, legend/panel/pie charts) | 83.5 | 72.5 | 88.9 | 70.7 | 80.4 | 79.2 |
 | docparse_hybrid_v0 (+ PaddleOCR-VL-1.6 crops, vector bars/lines/areas, chart table labels, complete Heron class mapping) | 83.46 | 76.79 | 88.84 | 70.43 | 81.01 | 80.11 |
-| docparse_hybrid_v0 (+ calibrated DocLayNet Section/Text reranker; 2026-10-13) | 83.46 | **76.79** | 88.85 | 70.43 | **81.33** | **80.17** |
+| docparse_hybrid_v0 (+ calibrated DocLayNet Section/Text reranker; 2026-10-13) | 83.46 | 76.79 | 88.85 | 70.43 | 81.33 | 80.17 |
+| docparse_hybrid_v0 (+ shared native-style alignment; 2026-10-13) | 83.46 | **76.79** | **88.92** | **71.18** | **81.34** | **80.34** |
 | LlamaParse Cost Effective (leaderboard) | 84.2 | 77.9 | 89.9 | 67.3 | 83.8 | 80.6 |
 | best open-weight single model (leaderboard) | 86.4 | 64.9 | 88.8 | 71.7 | 74.3 | 77.2 |
 
@@ -62,6 +64,14 @@ uv run docparse run docparse_hybrid_v0 --skip_inference --input_dir data --outpu
 uv run oracle docparse_hybrid_v0 --output_dir output_heron
 ```
 
+Compare a candidate with the same evaluator and cached inputs using paired
+category reports. This rejects missing files, changed metric coverage, failed
+examples and mismatched evaluator versions:
+
+```bash
+uv run python scripts/paired_report.py output_heron/docparse_hybrid_v0 output_candidate/docparse_hybrid_v0 --out output_candidate/paired_delta.json
+```
+
 `scripts/chart_eval.py <module:function>` scores a chart reconstruction against the
 chart rules on all 568 chart pages.
 
@@ -69,7 +79,13 @@ The [DocLayNet Section/Text reranker](docs/section-text-reranker.md) uses a bund
 forest calibrated on validation data. It is enabled by default after full-set
 validation. Set `DOCPARSE_SECTION_TEXT_MODEL=` to disable it for a paired control.
 
-## Components (all Apache/MIT)
+[Native-style alignment](docs/style-alignment.md) uses one monotone character
+mapping for all styles, retains occurrence identity and supports single-character
+superscripts. It is enabled by default; set `DOCPARSE_STYLE_ALIGNMENT=legacy` for
+the previous style-transfer control. The full-set gain includes regressions on
+eight formatting examples, alongside improvements on 22.
+
+## Model components
 
 | Role | Model | ParseBench (single) |
 |---|---|---|

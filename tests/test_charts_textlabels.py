@@ -49,3 +49,22 @@ def test_snap_replaces_misread_values_and_keeps_structure():
     assert t is not None and t.source == "snap"
     assert t.header == ["Item", "Value"]
     assert t.rows == [["Alpha", "12.5"], ["Beta", "7.25"]]
+
+
+def test_snap_keeps_chart_caption_when_correcting_values():
+    spans = [
+        _span("Alpha", 10, 50), _span("Beta", 10, 80),
+        _span("12.5", 120, 50, w=16), _span("7.25", 90, 80, w=16),
+    ]
+    vlm = (
+        "<table><caption>Revenue by region &amp; year</caption>"
+        "<tr><th>Item</th><th>Value</th></tr>"
+        "<tr><td>Alpha</td><td>12.6</td></tr>"
+        "<tr><td>Beta</td><td>72.5</td></tr></table>"
+    )
+    t = snap_table(_region(spans, vlm))
+    assert t is not None and t.source == "snap"
+    assert t.caption == "Revenue by region & year"
+    assert t.header == ["Item", "Value"]
+    assert t.rows == [["Alpha", "12.5"], ["Beta", "7.25"]]
+    assert "<caption>Revenue by region &amp; year</caption>" in t.to_html()

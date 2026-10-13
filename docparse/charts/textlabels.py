@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 import statistics
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import pymupdf
 from rapidfuzz import fuzz
@@ -555,7 +555,7 @@ def snap_table(region: ChartRegion) -> ChartTable | None:
     header = list(vlm.header) + [""] * max(0, ncols - len(vlm.header))
     if ref.header and ref.header[0] and not header[0]:
         header[0] = ref.header[0]
-    return ChartTable(header=header, rows=rows, confidence=ref.confidence, source="snap")
+    return replace(vlm, header=header, rows=rows, confidence=ref.confidence, source="snap")
 
 
 # --------------------------------------------------------------------------- page entry

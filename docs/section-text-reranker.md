@@ -8,7 +8,7 @@ labels and preserves titles, list items, markdown, scanned pages, visual
 classes and explicit VLM headings. Font-inferred headings may be reconsidered;
 the original VLM label is retained internally to distinguish their origin.
 
-The full ParseBench result is **80.17 overall / 81.33 layout**, compared with
+At the reranker's release, the full ParseBench result was **80.17 overall / 81.33 layout**, compared with
 **80.11 / 81.01** without the reranker. All 2,078 examples succeeded. Layout
 improved on 28 documents, with no regressions; content improved slightly and
 the other dimensions were unchanged. The model demoted 302 Section-header

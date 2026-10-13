@@ -10,6 +10,7 @@ heading levels). Blocks whose text-layer content does not resemble the VLM text
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Any
 
@@ -231,11 +232,13 @@ def _styled_runs(lines: list[Line]) -> list[tuple[str, Span]]:
 
 
 def transfer_styles(vlm_text: str, lines: list[Line]) -> str:
-    """Wrap the VLM's characters with the text layer's styling. Every attribute's
-    maximal runs are located in the *clean* text by fuzzy alignment; all markers
-    are then inserted in one pass with proper nesting (bold outermost … mark
-    innermost), so an underline crossing a highlight or a line break stays one
-    ``<u>…</u>``. Characters stay the VLM's."""
+    """Transfer native styles while retaining VLM characters. The default shares
+    one monotone character alignment; legacy fuzzy searches remain available
+    for paired comparisons."""
+    if os.getenv("DOCPARSE_STYLE_ALIGNMENT", "monotone") == "monotone":
+        from docparse.styles import transfer_aligned_styles
+
+        return transfer_aligned_styles(vlm_text, lines)
     ranges: list[tuple[int, int, str]] = []
     for attr in _ATTRS:
         taken: list[tuple[int, int]] = []
