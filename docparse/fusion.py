@@ -28,6 +28,7 @@ from rapidfuzz import fuzz
 
 from docparse.hybrid import _lines_in_bbox, transfer_styles
 from docparse.textlayer import TextLayerPage
+from docparse.section_text import rerank
 
 logger = logging.getLogger(__name__)
 
@@ -268,6 +269,7 @@ def detector_items(
     located = [b for b in blocks if b.get("bbox") is not None]
     for d in dets:
         label = d["label"]
+        vlm_heading = False
         over = [b for b in located if _inter(b["bbox"], d["bbox"]) / _area(d["bbox"]) >= 0.3]
         inside = [b for b in located if _inter(b["bbox"], d["bbox"]) / _area(b["bbox"]) >= 0.6 and b["label"] in TEXTUAL]
         # The detector has no list-item class and merges stacked short elements: when
@@ -292,8 +294,11 @@ def detector_items(
             heads = [b for b in inside if b["label"] in HEADING]
             if heads and len(inside) == 1 and len(re.sub(r"\s+", " ", heads[0]["text"])) <= 120:
                 label = heads[0]["label"]
+                vlm_heading = True
             elif len(inside) <= 1 and _heading_signature(d["bbox"], tl):
                 label = "section_header"
+        if not vlm_heading:
+            label = rerank(label, d["bbox"], tl, d["label"], d["score"])
         text = ""
         if tl is not None and tl.has_text and not tl.scanned and (label in TEXTUAL or label in ("image", "chart")):
             # pictures too: infographic text inside a figure is what attribution scores

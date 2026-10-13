@@ -64,6 +64,10 @@ uv run oracle docparse_hybrid_v0 --output_dir output_heron
 `scripts/chart_eval.py <module:function>` scores a chart reconstruction against the
 chart rules on all 568 chart pages.
 
+The [DocLayNet Section/Text reranker](docs/section-text-reranker.md) is experimental
+and disabled by default. Its training and full-set validation workflow is separate
+from the published results above.
+
 ## Components (all Apache/MIT)
 
 | Role | Model | ParseBench (single) |
@@ -76,9 +80,10 @@ Avoided: MinerU, KDL/florin/rakedoc-nano (AGPL), Chandra (non-compete license).
 
 ## Compute
 
-Everything after the VLM pass is CPU-only. `serve/modal_vllm.py` runs the VLM on one
-L4 container (2-minute idle scale-down, 1-hour hard timeout); a full ParseBench run
-is about an L4-hour.
+Text-layer extraction, fusion, vector reconstruction and rescoring cached outputs
+use CPU only. Initial VLM, layout-detector and chart-crop inference use GPUs.
+`serve/modal_vllm.py` runs the VLM on one L4 container (2-minute idle scale-down,
+1-hour hard timeout); a full ParseBench VLM run is about an L4-hour.
 
 ## Quickstart
 
