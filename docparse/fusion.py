@@ -294,7 +294,7 @@ def detector_items(
             heads = [b for b in inside if b["label"] in HEADING]
             if heads and len(inside) == 1 and len(re.sub(r"\s+", " ", heads[0]["text"])) <= 120:
                 label = heads[0]["label"]
-                vlm_heading = True
+                vlm_heading = heads[0].get("_vlm_label", heads[0]["label"]) in HEADING
             elif len(inside) <= 1 and _heading_signature(d["bbox"], tl):
                 label = "section_header"
         if not vlm_heading:

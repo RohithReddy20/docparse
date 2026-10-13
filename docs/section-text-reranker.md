@@ -4,7 +4,8 @@ The reranker changes layout labels using PDF text, font, geometry and detector
 confidence. It is experimental and disabled unless `DOCPARSE_SECTION_TEXT_MODEL`
 points to a compatible model JSON. It changes only Text/Section-header detector
 labels and preserves titles, list items, markdown, scanned pages, visual
-classes and headings promoted from VLM blocks.
+classes and explicit VLM headings. Font-inferred headings may be reconsidered;
+the original VLM label is retained internally to distinguish their origin.
 
 The published full-set score is **80.11 overall / 81.01 layout** without the
 reranker. An earlier annotation-box-only forest achieved 96.74% accuracy on

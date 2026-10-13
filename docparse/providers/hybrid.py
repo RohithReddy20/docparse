@@ -72,7 +72,7 @@ class DocparseHybridProvider(LightOnOCR3Provider):
         layout_pages: list[ParseLayoutPageIR] = []
         for p in raw["page_results"]:
             idx = p["page_index"]
-            blocks = parse_grounding(p["raw_text"])
+            blocks = [{**b, "_vlm_label": b["label"]} for b in parse_grounding(p["raw_text"])]
             tl = layers[idx] if idx < len(layers) else None
             blocks = reconcile_page(blocks, tl)
             if dets and idx < len(dets.get("pages", [])):

@@ -103,6 +103,21 @@ def test_vlm_heading_promotion_is_preserved(tmp_path, monkeypatch):
     assert item["label"] == "section_header"
 
 
+def test_font_inferred_heading_can_be_reranked_without_changing_markdown(tmp_path, monkeypatch):
+    from docparse.fusion import detector_items
+    from docparse.providers.lightonocr3 import blocks_to_markdown
+
+    monkeypatch.setenv("DOCPARSE_SECTION_TEXT_MODEL", str(_model(tmp_path, 0.02)))
+    block = {"label": "section_header", "_vlm_label": "text", "source": "styled-vlm-split",
+             "bbox": [100, 100, 400, 130], "text": "## 1. Overview", "continuation": False}
+    detections = {"width": 500, "height": 500, "predictions": [
+        {"bbox": [50, 50, 200, 65], "label": "text", "score": 0.99}]}
+    before = blocks_to_markdown([block])
+    (item,) = detector_items([block], detections, _page())
+    assert item["label"] == "text"
+    assert blocks_to_markdown([block]) == before
+
+
 def test_gate_calibration_uses_changed_labels_only():
     import numpy as np
     from scripts.train_section_text import select_gate
