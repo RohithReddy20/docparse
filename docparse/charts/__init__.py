@@ -55,6 +55,7 @@ class ChartTable:
     confidence: float = 0.0
     source: str = ""
     caption: str = ""  # chart / panel title; emitted as <caption> (a label source for the scorer)
+    row_header_columns: int = 1
 
     def __post_init__(self) -> None:
         # Ligatures ("Inﬂation") never match annotated labels: fold them.
@@ -69,7 +70,7 @@ class ChartTable:
         head = "".join(f"<th>{html.escape(h)}</th>" for h in self.header)
         body = "".join(
             "<tr>" + "".join(
-                (f"<th>{html.escape(c)}</th>" if i == 0 else f"<td>{html.escape(c)}</td>") for i, c in enumerate(r)
+                (f"<th>{html.escape(c)}</th>" if i < self.row_header_columns else f"<td>{html.escape(c)}</td>") for i, c in enumerate(r)
             ) + "</tr>"
             for r in self.rows
         )
@@ -136,15 +137,31 @@ def region_from_page(
 def parse_html_table(table_html: str) -> ChartTable | None:
     """Minimal parser for the VLM's <table> (thead/tbody or plain rows)."""
     rows: list[list[str]] = []
+    pending: dict[int, tuple[str, int]] = {}
     for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", table_html, flags=re.S | re.I):
-        cells = re.findall(r"<t[hd][^>]*>(.*?)</t[hd]>", tr, flags=re.S | re.I)
-        cells = [html.unescape(re.sub(r"<[^>]+>", " ", c)).strip() for c in cells]
-        cells = [re.sub(r"\s+", " ", c) for c in cells]
-        if cells:
-            rows.append(cells)
+        cells = re.findall(r"<t[hd]\b([^>]*)>(.*?)</t[hd]>", tr, flags=re.S | re.I)
+        row = {col: text for col, (text, _) in pending.items()}
+        pending = {col: (text, remaining - 1) for col, (text, remaining) in pending.items() if remaining > 1}
+        col = 0
+        for attrs, content in cells:
+            text = re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", content))).strip()
+            spans = {name.lower(): min(256, max(1, int(n))) for name, n in re.findall(r"\b(rowspan|colspan)\s*=\s*['\"]?(\d+)", attrs, re.I)}
+            while col in row:
+                col += 1
+            for _ in range(spans.get("colspan", 1)):
+                row[col] = text
+                if spans.get("rowspan", 1) > 1:
+                    pending[col] = (text, spans["rowspan"] - 1)
+                col += 1
+        if row:
+            rows.append([row.get(i, "") for i in range(max(row) + 1)])
     if not rows:
         return None
-    return ChartTable(header=rows[0], rows=rows[1:], source="vlm")
+    if len(rows) > 1 and all(len(row) == len(rows[0]) + 1 for row in rows[1:]):
+        rows[0].insert(0, "")
+    caption = re.search(r"<caption\b[^>]*>(.*?)</caption>", table_html, flags=re.S | re.I)
+    caption_text = html.unescape(re.sub(r"<[^>]+>", " ", caption.group(1))).strip() if caption else ""
+    return ChartTable(header=rows[0], rows=rows[1:], source="vlm", caption=caption_text)
 
 
 def to_dict(table: ChartTable) -> dict[str, Any]:

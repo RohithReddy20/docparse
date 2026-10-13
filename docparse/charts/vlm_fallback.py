@@ -138,22 +138,36 @@ def parse_model_output(text: str) -> list[ChartTable]:
     if not text or not text.strip():
         return []
     tables: list[ChartTable] = []
-    for html_table in re.findall(r"<table.*?</table>", text, flags=re.S | re.I):
-        t = parse_html_table(html_table)
+    for match in re.finditer(r"<table.*?</table>", text, flags=re.S | re.I):
+        t = parse_html_table(match.group())
         if t is not None and t.rows:
             t.source = "chart-vlm"
+            _restore_labels(t, text[:match.start()])
             tables.append(t)
     if tables:
         return tables
     if "|" in text:
         t = parse_pipe_table(text)
         if t is not None:
+            _restore_labels(t, text.split("|", 1)[0])
             return [t]
     t = parse_bullet_table(text)
     if t is not None:
         return [t]
     t = parse_tsv_table(text)
     return [t] if t is not None else []
+
+
+def _restore_labels(table: ChartTable, prefix: str) -> None:
+    """Keep the model's explicit title and leading categorical columns."""
+    headings = re.findall(r"^\s*#{1,6}\s+(.+?)\s*#*\s*$", prefix, flags=re.M)
+    if headings and not table.caption and headings[-1].lower() not in _SKIP_HEADINGS:
+        table.caption = headings[-1]
+    for col in range(1, len(table.header) - 1):
+        values = [r[col] for r in table.rows if len(r) > col and r[col].strip()]
+        if not values or any(re.search(r"\d", v) or not any(c.isalpha() for c in v) for v in values):
+            break
+        table.row_header_columns = col + 1
 
 
 def fallback_tables(page_record: dict[str, Any] | None, bbox1000: list[float]) -> list[ChartTable]:

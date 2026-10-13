@@ -40,10 +40,10 @@ def _points(table: ChartTable) -> set[tuple[str, str, str]]:
     for row in table.rows:
         if not row:
             continue
-        for ci, cell in enumerate(row[1:], start=1):
+        for ci, cell in enumerate(row[table.row_header_columns:], start=table.row_header_columns):
             col = table.header[ci] if ci < len(table.header) else ""
             for m in _NUM_RE.findall(clean_number(cell)):
-                out.add((_key(row[0]), _key(col), m))
+                out.add((_key(" ".join(row[:table.row_header_columns])), _key(col), m))
     return out
 
 
@@ -106,8 +106,8 @@ def enhance_chart_blocks(blocks: list[dict[str, Any]], page: pymupdf.Page, tl: T
         for b in blocks
     ]
     chart_idx = [i for i, b in enumerate(out) if b["label"] == "chart" and b.get("bbox") is not None]
-    if not chart_idx or tl.scanned:
-        return blocks
+    if not chart_idx:
+        return out
     seen: set[tuple[str, str, str]] = set()
     extras: list[dict[str, Any]] = []
     vlm_record = None
@@ -123,14 +123,14 @@ def enhance_chart_blocks(blocks: list[dict[str, Any]], page: pymupdf.Page, tl: T
             b["bbox"][0] / 1000 * tl.width, b["bbox"][1] / 1000 * tl.height,
             b["bbox"][2] / 1000 * tl.width, b["bbox"][3] / 1000 * tl.height,
         ]
-        region = region_from_page(page, tl, bbox_pts, vlm_table_html=b["text"] if "<table" in b["text"] else None)
+        region = None if tl.scanned else region_from_page(page, tl, bbox_pts, vlm_table_html=b["text"] if "<table" in b["text"] else None)
         try:
-            snapped = textlabels.snap_table(region) if region.vlm_table_html else None
+            snapped = textlabels.snap_table(region) if region and region.vlm_table_html else None
         except Exception as e:  # noqa: BLE001
             logger.warning("snap_table failed: %s", e)
             snapped = None
         base = snapped or (parse_html_table(b["text"]) if "<table" in b["text"] else None)
-        caption = chart_caption(region, tl, base)
+        caption = chart_caption(region, tl, base) if region else ""
         nb = dict(b)
         nb["text"] = with_caption(snapped.to_html() if snapped is not None else row_headers(b["text"]), caption)
         nb["source"] = "chart-snap" if snapped is not None else b.get("source", "vlm")
@@ -142,6 +142,8 @@ def enhance_chart_blocks(blocks: list[dict[str, Any]], page: pymupdf.Page, tl: T
             if _novel(t, seen):
                 extras.append({**b, "text": with_caption(t.to_html(), caption), "source": "chart-vlm", "continuation": False})
                 seen |= _points(t)
+        if region is None:
+            continue
         try:
             for t in textlabels.panel_tables(region):
                 if _novel(t, seen):
@@ -153,7 +155,7 @@ def enhance_chart_blocks(blocks: list[dict[str, Any]], page: pymupdf.Page, tl: T
     caption_for_anchor = re.search(r"<caption>(.*?)</caption>", anchor_b["text"], flags=re.S)
     caption_for_anchor = _html.unescape(caption_for_anchor.group(1)) if caption_for_anchor else ""
     try:
-        for t in vector.reconstruct_page(page, tl):
+        for t in ([] if tl.scanned else vector.reconstruct_page(page, tl)):
             if _novel(t, seen):
                 anchor = out[chart_idx[-1]]
                 extras.append({**anchor, "text": with_caption(t.to_html(), caption_for_anchor), "source": "chart-vector", "continuation": False})
