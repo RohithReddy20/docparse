@@ -47,7 +47,8 @@ across variants; the hybrid also uses saved layout detections and chart crops):
 | LightOnOCR-3-0.8B alone (our provider) | 83.5 | 61.0 | 88.9 | 64.7 | 66.0 | 72.8 |
 | docparse_hybrid_v0 (+ PP-DocLayout-V3 fusion) | 83.5 | 70.4 | 89.0 | 70.6 | 73.8 | 77.5 |
 | docparse_hybrid_v0 (+ Docling heron fusion, legend/panel/pie charts) | 83.5 | 72.5 | 88.9 | 70.7 | 80.4 | 79.2 |
-| docparse_hybrid_v0 (+ PaddleOCR-VL-1.6 crops, vector bars/lines/areas, chart table labels, complete Heron class mapping; 2026-10-13) | 83.46 | **76.79** | 88.84 | 70.43 | **81.01** | **80.11** |
+| docparse_hybrid_v0 (+ PaddleOCR-VL-1.6 crops, vector bars/lines/areas, chart table labels, complete Heron class mapping) | 83.46 | 76.79 | 88.84 | 70.43 | 81.01 | 80.11 |
+| docparse_hybrid_v0 (+ calibrated DocLayNet Section/Text reranker; 2026-10-13) | 83.46 | **76.79** | 88.85 | 70.43 | **81.33** | **80.17** |
 | LlamaParse Cost Effective (leaderboard) | 84.2 | 77.9 | 89.9 | 67.3 | 83.8 | 80.6 |
 | best open-weight single model (leaderboard) | 86.4 | 64.9 | 88.8 | 71.7 | 74.3 | 77.2 |
 
@@ -64,9 +65,9 @@ uv run oracle docparse_hybrid_v0 --output_dir output_heron
 `scripts/chart_eval.py <module:function>` scores a chart reconstruction against the
 chart rules on all 568 chart pages.
 
-The [DocLayNet Section/Text reranker](docs/section-text-reranker.md) is experimental
-and disabled by default. Its training and full-set validation workflow is separate
-from the published results above.
+The [DocLayNet Section/Text reranker](docs/section-text-reranker.md) uses a bundled
+forest calibrated on validation data. It is enabled by default after full-set
+validation. Set `DOCPARSE_SECTION_TEXT_MODEL=` to disable it for a paired control.
 
 ## Components (all Apache/MIT)
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 import math
 import os
@@ -21,6 +22,7 @@ FEATURES = BASE_FEATURES + ("baseline_heading", "detector_heading", "detector_sc
 VERSION = 2
 HEADING = {"title", "section_header"}
 RERANK_LABELS = {"text", "section_header"}
+DEFAULT_MODEL = Path(__file__).with_name("models") / "section_text_v2.json.gz"
 
 
 def _overlap(a: list[float], b: list[float]) -> float:
@@ -96,7 +98,11 @@ def context_features(
 
 @lru_cache(maxsize=2)
 def load_model(path: str) -> dict:
-    model = json.loads(Path(path).read_text())
+    if path.endswith(".gz"):
+        with gzip.open(path, "rt", encoding="utf-8") as source:
+            model = json.load(source)
+    else:
+        model = json.loads(Path(path).read_text())
     if model.get("version") != VERSION or model.get("features") != list(FEATURES) or not model.get("trees"):
         raise ValueError("Incompatible Section/Text model")
     if not 0 <= model["demote_threshold"] <= 0.1 < 0.9 <= model["promote_threshold"] <= 1:
@@ -107,7 +113,7 @@ def load_model(path: str) -> dict:
 def rerank(
     label: str, bbox1000: list[float], tl: TextLayerPage | None, detector_label: str | None = None, detector_score: float = 0.0
 ) -> str:
-    path = os.getenv("DOCPARSE_SECTION_TEXT_MODEL")
+    path = os.getenv("DOCPARSE_SECTION_TEXT_MODEL", str(DEFAULT_MODEL))
     if not path or label not in RERANK_LABELS or (detector_label and detector_label not in RERANK_LABELS):
         return label
     values = context_features(tl, bbox1000, label, detector_label or label, detector_score)

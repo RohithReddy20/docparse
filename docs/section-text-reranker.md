@@ -1,14 +1,20 @@
 # Section/Text reranker
 
 The reranker changes layout labels using PDF text, font, geometry and detector
-confidence. It is experimental and disabled unless `DOCPARSE_SECTION_TEXT_MODEL`
-points to a compatible model JSON. It changes only Text/Section-header detector
+confidence. The bundled compressed JSON forest is enabled by default. Set
+`DOCPARSE_SECTION_TEXT_MODEL` to an empty string to disable it, or to a compatible
+JSON/JSON.gz path to override it. It changes only Text/Section-header detector
 labels and preserves titles, list items, markdown, scanned pages, visual
 classes and explicit VLM headings. Font-inferred headings may be reconsidered;
 the original VLM label is retained internally to distinguish their origin.
 
-The published full-set score is **80.11 overall / 81.01 layout** without the
-reranker. An earlier annotation-box-only forest achieved 96.74% accuracy on
+The full ParseBench result is **80.17 overall / 81.33 layout**, compared with
+**80.11 / 81.01** without the reranker. All 2,078 examples succeeded. Layout
+improved on 28 documents, with no regressions; content improved slightly and
+the other dimensions were unchanged. The model demoted 302 Section-header
+labels across 146 documents while preserving markdown, text, boxes and order.
+
+An earlier annotation-box-only forest achieved 96.74% accuracy on
 held-out DocLayNet boxes but regressed its paired full ParseBench control from
 79.95 to 79.91 overall, and 80.41 to 80.20 layout. It was rejected. DocLayNet box
 accuracy alone is insufficient evidence of a ParseBench improvement.
@@ -25,11 +31,24 @@ ParseBench documents and labels are not used for training or calibration.
 
 `scripts/train_section_text.py` trains a 120-tree forest and exports JSON trees
 for inference without scikit-learn. Promotion and demotion gates are selected
-on validation examples whose baseline label would change: at least 50 examples
-and 98.5% precision are required. A direction is disabled when no gate qualifies.
+on validation examples whose baseline label would change: at least 20 examples
+and 95% precision are required. A direction is disabled when no gate qualifies.
 Held-out test metrics include the net number of corrected baseline labels.
 The exported evaluator must match scikit-learn probabilities within 1e-10,
 including its float32 input conversion.
+
+The released model uses demotion probability <= 0.1; promotion is disabled.
+Validation corrected 36 of 37 changed labels, and the independent test split
+corrected 22 of 24. The initial 50-case/98.5% policy disabled both directions.
+The final policy was selected using DocLayNet validation only and passed the
+full ParseBench comparison before enabling. Reweighting baseline errors by ten
+worsened validation and was rejected.
+
+The model trained on 4,454 native-text pages (35,752 matched boxes), with
+1,329 validation and 881 test pages from disjoint documents. Scanned/no-text
+pages were excluded from the prepared 5,000/1,500/1,000-page input. Training
+metadata, hashes and held-out metrics are in
+`docparse/models/section_text_v2_metrics.json`.
 
 Create a private Kaggle script using a DocLayNet input that contains the core
 COCO/PNG and extra PDF directories:
@@ -92,4 +111,4 @@ uv run oracle docparse_hybrid_v0 --output_dir output_reranker
 Verify that all examples succeeded and that markdown, text, boxes and order are
 unchanged from the paired control. Promote only after full-set scores show a
 gain; the 12-document test split is insufficient. Leaving the environment
-variable unset or empty retains the published parser.
+variable empty disables the model; leaving it unset uses the bundled model.

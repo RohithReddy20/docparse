@@ -43,8 +43,8 @@ def test_forest_uses_training_float32_precision_at_split_boundaries():
     assert probability(model, [0.9]) == 0
 
 
-def test_reranker_is_opt_in_and_preserves_non_text_classes(tmp_path, monkeypatch):
-    monkeypatch.delenv("DOCPARSE_SECTION_TEXT_MODEL", raising=False)
+def test_reranker_can_be_disabled_and_preserves_non_text_classes(tmp_path, monkeypatch):
+    monkeypatch.setenv("DOCPARSE_SECTION_TEXT_MODEL", "")
     assert rerank("text", [100, 100, 400, 130], _page()) == "text"
     monkeypatch.setenv("DOCPARSE_SECTION_TEXT_MODEL", str(_model(tmp_path, 1)))
     assert rerank("text", [100, 100, 400, 130], _page()) == "section_header"
@@ -53,6 +53,18 @@ def test_reranker_is_opt_in_and_preserves_non_text_classes(tmp_path, monkeypatch
     assert rerank("list", [100, 100, 400, 130], _page()) == "list"
     assert rerank("text", [100, 100, 400, 130], _page(), "title", 0.99) == "text"
     assert rerank("text", [100, 100, 400, 130], None) == "text"
+
+
+def test_bundled_model_is_compatible_and_has_verified_content():
+    import gzip
+    import hashlib
+    from docparse.section_text import DEFAULT_MODEL
+
+    metrics = json.loads(DEFAULT_MODEL.with_name("section_text_v2_metrics.json").read_text())
+    assert hashlib.sha256(gzip.decompress(DEFAULT_MODEL.read_bytes())).hexdigest() == metrics["model_sha256"]
+    model = load_model(str(DEFAULT_MODEL))
+    assert model["demote_enabled"] and not model["promote_enabled"]
+    assert model["demote_threshold"] == 0.1
 
 
 def test_reranker_demotes_only_confident_text_and_keeps_uncertain_heading(tmp_path, monkeypatch):

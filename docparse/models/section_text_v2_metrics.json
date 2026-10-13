@@ -1,0 +1,165 @@
+{
+  "features": [
+    "lines",
+    "chars",
+    "words",
+    "bold",
+    "italic",
+    "size_mean",
+    "size_min",
+    "size_max",
+    "uppercase",
+    "digits",
+    "sentence_end",
+    "colon_end",
+    "numbered",
+    "bullet",
+    "left",
+    "top",
+    "width",
+    "height",
+    "gap_above",
+    "gap_below",
+    "size_above",
+    "size_below",
+    "baseline_heading",
+    "detector_heading",
+    "detector_score"
+  ],
+  "export_max_error": 3.3306690738754696e-16,
+  "model_sha256": "6a83f542fff881dda92b6fa23f59e7ab1dbf2e873f255e34c47034daae01838d",
+  "training": {
+    "dataset": "DocLayNet",
+    "source": "https://github.com/DS4SD/DocLayNet",
+    "seed": 13,
+    "splits": "official train/val/test, sampled without cross-split document overlap",
+    "detector": "docling-project/docling-layout-heron",
+    "matching": "Highest IoU GT, IoU >= 0.5; detector and GT restricted to Text/Section-header",
+    "calibration": "precision of changed baseline labels on validation only",
+    "sklearn": "1.6.1",
+    "parameters": {
+      "n_estimators": 120,
+      "max_depth": 12,
+      "min_samples_leaf": 10,
+      "max_features": 0.7,
+      "n_jobs": -1,
+      "random_state": 13
+    },
+    "calibration_policy": {
+      "minimum_changed_cases": 20,
+      "minimum_precision": 0.95,
+      "selection": "maximum validation net correction within each direction, fixed conservative probability range"
+    }
+  },
+  "selected_gates": {
+    "promote": null,
+    "demote": {
+      "threshold": 0.1,
+      "count": 37,
+      "correct": 36,
+      "precision": 0.972972972972973,
+      "net_correct": 35
+    }
+  },
+  "validation_metrics": {
+    "baseline_accuracy": 0.9792134424567248,
+    "boxes": 13807,
+    "heading_fraction": 0.2518287825016296,
+    "accuracy": 0.9793582965162598,
+    "balanced_accuracy": 0.9641679619994872,
+    "precision": 0.9836363636363636,
+    "recall": 0.9335634167385677,
+    "f1": 0.9579459938025675,
+    "promote": {
+      "count": 0,
+      "precision": null
+    },
+    "demote": {
+      "count": 37,
+      "precision": 0.972972972972973
+    },
+    "gated_accuracy": 0.9817483884985877,
+    "gated_net_correct": 35
+  },
+  "test_metrics": {
+    "baseline_accuracy": 0.9687788372808367,
+    "boxes": 6502,
+    "heading_fraction": 0.2320824361734851,
+    "accuracy": 0.9796985542909874,
+    "balanced_accuracy": 0.9708283445730583,
+    "precision": 0.9580838323353293,
+    "recall": 0.9542743538767395,
+    "f1": 0.9561752988047809,
+    "promote": {
+      "count": 0,
+      "precision": null
+    },
+    "demote": {
+      "count": 24,
+      "precision": 0.9166666666666666
+    },
+    "gated_accuracy": 0.9718548139034143,
+    "gated_net_correct": 20
+  },
+  "splits": {
+    "train": {
+      "counts": {
+        "pages": 4454,
+        "Text": 27709,
+        "baseline_correct": 34918,
+        "Heading": 8043,
+        "unmatched_or_other_class": 5922,
+        "no_text_page": 546,
+        "no_text_box": 66
+      },
+      "documents": 1212,
+      "annotation_sha256": "1dd23f61eca98d2b7cdfc2dd7ea36606f56d79bab570996e81d11eecde4b0bba"
+    },
+    "validation": {
+      "counts": {
+        "no_text_page": 171,
+        "pages": 1329,
+        "Text": 10330,
+        "baseline_correct": 13520,
+        "Heading": 3477,
+        "unmatched_or_other_class": 2190,
+        "no_text_box": 12
+      },
+      "documents": 101,
+      "annotation_sha256": "24ad359acbd30c44d750b69b64a7418f767782f4a6decd5c1745ec06e2926e90"
+    },
+    "test": {
+      "counts": {
+        "no_text_page": 119,
+        "pages": 881,
+        "Text": 4993,
+        "baseline_correct": 6299,
+        "unmatched_or_other_class": 1793,
+        "Heading": 1509,
+        "no_text_box": 6
+      },
+      "documents": 133,
+      "annotation_sha256": "e6976de2ad0622fe7b716b4e375c3c808be6646c02f95a27c243b8f8536fafaf"
+    }
+  },
+  "upstream_model_sha256": "1ccd10a16cd96f1fb784e751c03a91b39b67eea4b55212bf154a304595b53d71",
+  "compressed_model_sha256": "ed2fd822e42bf7360649222c4cf60cbd6bf0d61cdcf74d5aa2f503f80b00170d",
+  "parsebench": {
+    "files": 2078,
+    "errors": 0,
+    "baseline_overall": 80.10803638503921,
+    "overall": 80.17303145110881,
+    "scores": {
+      "table": 83.46116906053874,
+      "chart": 76.79237673515843,
+      "content": 88.84647377152208,
+      "formatting": 70.43353599711807,
+      "layout": 81.3316016912067
+    },
+    "layout_documents_improved": 28,
+    "layout_documents_regressed": 0,
+    "layout_labels_demoted": 302,
+    "documents_with_label_changes": 146,
+    "markdown_text_boxes_order_preserved": true
+  }
+}
