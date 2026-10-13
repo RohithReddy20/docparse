@@ -47,7 +47,7 @@ across variants; the hybrid also uses saved layout detections and chart crops):
 | LightOnOCR-3-0.8B alone (our provider) | 83.5 | 61.0 | 88.9 | 64.7 | 66.0 | 72.8 |
 | docparse_hybrid_v0 (+ PP-DocLayout-V3 fusion) | 83.5 | 70.4 | 89.0 | 70.6 | 73.8 | 77.5 |
 | docparse_hybrid_v0 (+ Docling heron fusion, legend/panel/pie charts) | 83.5 | 72.5 | 88.9 | 70.7 | 80.4 | 79.2 |
-| docparse_hybrid_v0 (+ PaddleOCR-VL-1.6 crops, calibrated vector bars/lines/areas; 2026-10-13) | 83.46 | **76.57** | 88.86 | 70.43 | **80.41** | **79.95** |
+| docparse_hybrid_v0 (+ PaddleOCR-VL-1.6 crops, vector bars/lines/areas, complete Heron class mapping; 2026-10-13) | 83.46 | **76.57** | 88.85 | 70.43 | **81.01** | **80.06** |
 | LlamaParse Cost Effective (leaderboard) | 84.2 | 77.9 | 89.9 | 67.3 | 83.8 | 80.6 |
 | best open-weight single model (leaderboard) | 86.4 | 64.9 | 88.8 | 71.7 | 74.3 | 77.2 |
 
