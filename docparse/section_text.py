@@ -20,6 +20,7 @@ BASE_FEATURES = (
 FEATURES = BASE_FEATURES + ("baseline_heading", "detector_heading", "detector_score")
 VERSION = 2
 HEADING = {"title", "section_header"}
+RERANK_LABELS = {"text", "section_header"}
 
 
 def _overlap(a: list[float], b: list[float]) -> float:
@@ -107,7 +108,7 @@ def rerank(
     label: str, bbox1000: list[float], tl: TextLayerPage | None, detector_label: str | None = None, detector_score: float = 0.0
 ) -> str:
     path = os.getenv("DOCPARSE_SECTION_TEXT_MODEL")
-    if not path or label not in HEADING | {"text", "list"}:
+    if not path or label not in RERANK_LABELS or (detector_label and detector_label not in RERANK_LABELS):
         return label
     values = context_features(tl, bbox1000, label, detector_label or label, detector_score)
     if values is None:

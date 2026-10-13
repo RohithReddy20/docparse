@@ -50,6 +50,8 @@ def test_reranker_is_opt_in_and_preserves_non_text_classes(tmp_path, monkeypatch
     assert rerank("text", [100, 100, 400, 130], _page()) == "section_header"
     assert rerank("image", [100, 100, 400, 130], _page()) == "image"
     assert rerank("title", [100, 100, 400, 130], _page()) == "title"
+    assert rerank("list", [100, 100, 400, 130], _page()) == "list"
+    assert rerank("text", [100, 100, 400, 130], _page(), "title", 0.99) == "text"
     assert rerank("text", [100, 100, 400, 130], None) == "text"
 
 
@@ -118,8 +120,11 @@ def test_detector_training_excludes_unmatched_and_visual_ground_truth():
     annotations = [
         {"bbox": [0, 0, 100, 100], "category_id": 3},
         {"bbox": [10, 10, 20, 10], "category_id": 1},
-        {"bbox": [50, 50, 20, 10], "category_id": 2}]
+        {"bbox": [50, 50, 20, 10], "category_id": 2},
+        {"bbox": [80, 50, 20, 10], "category_id": 4}]
+    classes[4] = "Section-header"
     assert _target([0, 0, 100, 100], annotations, classes) is None
     assert _target([10, 10, 30, 20], annotations, classes) == 0
-    assert _target([50, 50, 70, 60], annotations, classes) == 1
+    assert _target([50, 50, 70, 60], annotations, classes) is None
+    assert _target([80, 50, 100, 60], annotations, classes) == 1
     assert _target([200, 200, 300, 300], annotations, classes) is None

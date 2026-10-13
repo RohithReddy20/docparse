@@ -2,10 +2,11 @@
 
 The reranker changes layout labels using PDF text, font, geometry and detector
 confidence. It is experimental and disabled unless `DOCPARSE_SECTION_TEXT_MODEL`
-points to a compatible model JSON. It preserves markdown, scanned pages, visual
+points to a compatible model JSON. It changes only Text/Section-header detector
+labels and preserves titles, list items, markdown, scanned pages, visual
 classes and headings promoted from VLM blocks.
 
-The published full-set score is **80.06 overall / 81.01 layout** without the
+The published full-set score is **80.11 overall / 81.01 layout** without the
 reranker. An earlier annotation-box-only forest achieved 96.74% accuracy on
 held-out DocLayNet boxes but regressed its paired full ParseBench control from
 79.95 to 79.91 overall, and 80.41 to 80.20 layout. It was rejected. DocLayNet box
@@ -15,7 +16,8 @@ accuracy alone is insufficient evidence of a ParseBench improvement.
 
 `scripts/doclaynet_heron_features.py` runs frozen Heron detections on DocLayNet
 images. It matches predictions to the highest-IoU annotation at IoU >= 0.5,
-excludes unmatched and visual/furniture targets, and extracts 25 features from
+restricts both detector and annotation classes to Text/Section-header, excludes
+unmatched boxes, and extracts 25 features from
 the predicted boxes and native PDFs. It samples 5,000 training, 1,500 validation
 and 1,000 test pages from the official splits, rejecting document overlap.
 ParseBench documents and labels are not used for training or calibration.
@@ -39,10 +41,25 @@ kaggle kernels push -p /tmp/docparse-section-training \
   -t 7200 --accelerator NvidiaTeslaT4
 ```
 
+For a first run, add `--smoke` when creating the bundle and use `-t 1200`
+when pushing it. This exercises detection, feature extraction, training and
+export on 128/64/64 pages; its model is for checking the workflow, not promotion.
+Only start the full run after this completes successfully.
+If a CPU notebook has prepared a smaller DocLayNet input with `COCO`, `PDF` and
+`PNG` directories, pass `--kernel-source USER/doclaynet-subset` when creating
+the training bundle. This mounts that notebook's output instead of the full
+dataset. Keep the official splits and reject document overlap when preparing it.
+
 The script uses both T4s and keeps dataset/model downloads on Kaggle. Training
 requires NumPy, scikit-learn, PyTorch, Transformers, PyMuPDF, Pillow and RapidFuzz;
 the Kaggle bootstrap installs missing PyMuPDF, Transformers and RapidFuzz.
 Completed split features are retained under `/kaggle/working/section_text_features`.
+`section_text_status.json`, `features.log`, `training.log` and
+`section_text_features/progress.json` record stage and batch progress. The
+feature subprocess is limited to 90 minutes (10 minutes in smoke mode), and
+training to five minutes. These limits begin after Kaggle starts the script;
+they cannot bound platform provisioning. A run stuck without its startup status
+file should be checked in Kaggle's version history and cancelled if necessary.
 Download only the model/report archive:
 
 ```bash

@@ -21,7 +21,7 @@ from docparse.textlayer import extract_page
 
 MODEL = "docling-project/docling-layout-heron"
 SEED = 13
-TARGETS = {"text", "list", "title", "section_header"}
+TARGETS = {"text", "section_header"}
 
 
 def _iou(a, b):
@@ -39,9 +39,9 @@ def _target(box, annotations, classes):
             best, label = overlap, classes[annotation["category_id"]]
     if best < 0.5:
         return None
-    if label in {"Title", "Section-header"}:
+    if label == "Section-header":
         return 1
-    if label in {"Text", "List-item", "Caption", "Footnote"}:
+    if label == "Text":
         return 0
     return None
 
@@ -69,7 +69,8 @@ def _detect(engine, pages):
     return predictions
 
 
-def collect(coco, pdf_root, png_root, limit, forbidden, engines, batch_size):
+def collect(coco, pdf_root, png_root, limit, forbidden, engines, batch_size, progress_path=None):
+    print("Loading annotations:", coco, flush=True)
     data = json.loads(coco.read_text())
     classes = {c["id"]: c["name"] for c in data["categories"]}
     annotations = defaultdict(list)
@@ -100,21 +101,32 @@ def collect(coco, pdf_root, png_root, limit, forbidden, engines, batch_size):
             if len(chunk) == batch_size * len(engines):
                 _consume(chunk, engines, batch_size, pool, annotations, classes, x, y, documents, counts)
                 chunk = []
-                if counts["pages"] % 256 == 0:
+                if progress_path is not None:
+                    progress_path.write_text(json.dumps({"split": coco.stem, "counts": dict(counts),
+                                                         "elapsed_seconds": time.monotonic() - start}))
+                if counts["pages"] == batch_size * len(engines) or counts["pages"] % 256 == 0:
                     print(coco.stem, counts["pages"], "pages", len(y), "matched predictions", round(time.monotonic() - start), "seconds", flush=True)
         if chunk:
             _consume(chunk, engines, batch_size, pool, annotations, classes, x, y, documents, counts)
+    if progress_path is not None:
+        progress_path.write_text(json.dumps({"split": coco.stem, "counts": dict(counts),
+                                             "elapsed_seconds": time.monotonic() - start}))
     if counts["pages"] < min(limit, 100):
         raise RuntimeError(f"Insufficient training pages: {dict(counts)}")
     print(coco.stem, dict(counts), "elapsed", round(time.monotonic() - start), flush=True)
+    if not y:
+        raise RuntimeError(f"No matched text/heading boxes: {dict(counts)}")
     return np.asarray(x, dtype=np.float32), np.asarray(y, dtype=np.int64), {
-        "counts": dict(counts), "documents": sorted(documents), "annotation_sha256": hashlib.sha256(coco.read_bytes()).hexdigest()}
+        "counts": dict(counts), "documents": sorted(documents), "elapsed_seconds": time.monotonic() - start,
+        "annotation_sha256": hashlib.sha256(coco.read_bytes()).hexdigest()}
 
 
 def _consume(pages, engines, batch_size, pool, annotations, classes, x, y, documents, counts):
     batches = [pages[i:i + batch_size] for i in range(0, len(pages), batch_size)]
     futures = [pool.submit(_detect, engine, batch) for engine, batch in zip(engines, batches)]
     predictions = [items for future in futures for items in future.result()]
+    if len(predictions) != len(pages):
+        raise RuntimeError("Detector did not return one prediction list per page")
     for (im, image, tl), boxes in zip(pages, predictions):
         counts["pages"] += 1
         documents.add(im["doc_name"])
@@ -147,21 +159,29 @@ def main():
     for name in ("coco", "pdf", "png", "output"):
         parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--train-pages", type=int, default=5000)
+    parser.add_argument("--validation-pages", type=int, default=1500)
+    parser.add_argument("--test-pages", type=int, default=1000)
     args = parser.parse_args()
+    if min(args.batch_size, args.train_pages, args.validation_pages, args.test_pages) < 1:
+        parser.error("Batch size and page limits must be positive")
     if not torch.cuda.is_available():
         raise RuntimeError("Kaggle T4 GPU is required for detector-aware feature generation")
     devices = [f"cuda:{i}" for i in range(torch.cuda.device_count())]
     print("GPUs:", [torch.cuda.get_device_name(i) for i in range(len(devices))], flush=True)
     if any("T4" not in torch.cuda.get_device_name(i) for i in range(len(devices))):
         raise RuntimeError("Expected Kaggle T4 GPUs")
+    print("Loading detector:", MODEL, flush=True)
     engines = [(RTDetrImageProcessor.from_pretrained(MODEL), RTDetrV2ForObjectDetection.from_pretrained(MODEL).to(d).eval(), d) for d in devices]
+    print("Detector ready", flush=True)
     args.output.mkdir(parents=True, exist_ok=True)
     forbidden = set()
-    for name, filename, limit in (("train", "train.json", 5000), ("validation", "val.json", 1500), ("test", "test.json", 1000)):
-        x, y, meta = collect(args.coco / filename, args.pdf, args.png, limit, forbidden, engines, args.batch_size)
+    for name, filename, limit in (("train", "train.json", args.train_pages), ("validation", "val.json", args.validation_pages), ("test", "test.json", args.test_pages)):
+        x, y, meta = collect(args.coco / filename, args.pdf, args.png, limit, forbidden, engines, args.batch_size,
+                             args.output / "progress.json")
         forbidden.update(meta["documents"])
         meta["detector"] = MODEL
-        meta["matching"] = "Highest IoU GT, IoU >= 0.5; unmatched and non-Text/Section classes excluded"
+        meta["matching"] = "Highest IoU GT, IoU >= 0.5; detector and GT restricted to Text/Section-header"
         np.savez_compressed(args.output / f"{name}.npz", x=x, y=y)
         (args.output / f"{name}.json").write_text(json.dumps(meta))
 
