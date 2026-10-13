@@ -1,7 +1,10 @@
 """Synthetic chart regions for the vector reconstruction."""
 
+import pymupdf
+import pytest
+
 from docparse.charts import ChartRegion
-from docparse.charts.vector import Bar, Poly, reconstruct_region
+from docparse.charts.vector import Bar, Poly, page_primitives_full, reconstruct_region
 from docparse.textlayer import Span
 
 
@@ -58,3 +61,53 @@ def test_line_series_sampled_at_categories() -> None:
     tables = reconstruct_region(_region(spans), [], [line])
     assert tables and tables[-1].header == ["", "Growth"]
     assert [r[1] for r in tables[-1].rows] == ["10", "50", "80"]
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_stacked_areas_use_band_thickness_with_offset_axis(reverse: bool) -> None:
+    spans = [_span(str(v + 100), 10, 200 - v - 4, 25, 200 - v + 4) for v in (0, 50, 100)]
+    spans += [_span(str(2020 + i), x - 10, 205, x + 10, 213) for i, x in enumerate((55, 105, 155))]
+    spans += [_span("Unmatched legend", 90, 235, 120, 243)]
+    red, blue = (1.0, 0.0, 0.0), (0.0, 0.0, 1.0)
+    points = [
+        [(55, 180), (105, 150), (155, 160), (155, 200), (55, 200)],
+        [(55, 150), (105, 130), (155, 150), (155, 160), (105, 150), (55, 180)],
+    ]
+    areas = [Poly(p[::-1] if reverse else p, c, [55, min(y for _, y in p), 155, max(y for _, y in p)], filled=True)
+             for p, c in zip(points, (red, blue))]
+    (table,) = reconstruct_region(_region(spans), [], areas, {red: "Red", blue: "Blue"})
+    assert table.source == "vector-area"
+    assert table.header == ["", "Red", "Blue"]
+    assert table.rows == [["2020", "20", "30"], ["2021", "50", "20"], ["2022", "40", "10"]]
+
+
+def test_area_requires_legend_and_value_axis() -> None:
+    red = (1.0, 0.0, 0.0)
+    area = Poly([(50, 170), (150, 140), (150, 200), (50, 200)], red, [50, 140, 150, 200], filled=True)
+    cats = [_span("A", 45, 205, 55, 213), _span("B", 145, 205, 155, 213)]
+    ticks = [_span(str(v), 10, 200 - v - 4, 25, 200 - v + 4) for v in (0, 50, 100)]
+    assert reconstruct_region(_region(cats), [], [area], {red: "Red"}) == []
+    assert reconstruct_region(_region(cats + ticks), [], [area]) == []
+
+
+def test_area_interpolates_named_categories_without_extrapolating() -> None:
+    red = (1.0, 0.0, 0.0)
+    area = Poly([(50, 170), (150, 140), (150, 200), (50, 200)], red, [50, 140, 150, 200], filled=True)
+    spans = [_span(str(v), 10, 200 - v - 4, 25, 200 - v + 4) for v in (0, 50, 100)]
+    spans += [_span(name, x - 5, 205, x + 5, 213) for x, name in ((50, "A"), (100, "B"), (150, "C"), (200, "D"))]
+    (table,) = reconstruct_region(_region(spans), [], [area], {red: "Red"})
+    assert table.rows == [["A", "30"], ["B", "45"], ["C", "60"]]
+
+
+def test_filled_subpaths_stay_separate_from_stroked_lines() -> None:
+    with pymupdf.open() as doc:
+        page = doc.new_page()
+        shape = page.new_shape()
+        for dx in (0, 200):
+            shape.draw_polyline([(50 + dx, 180), (150 + dx, 150), (150 + dx, 200), (50 + dx, 200), (50 + dx, 180)])
+        shape.finish(fill=(1, 0, 0), color=None)
+        shape.commit()
+        _, polys, _ = page_primitives_full(page)
+        assert len(polys) == 2
+        assert all(p.filled for p in polys)
+        assert [p.bbox for p in polys] == [[50, 150, 150, 200], [250, 150, 350, 200]]

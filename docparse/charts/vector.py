@@ -1,11 +1,12 @@
-"""Bar / line chart reconstruction from a born-digital PDF's vector drawings.
+"""Bar / line / area chart reconstruction from a born-digital PDF's drawings.
 
 Bars are axis-aligned filled rectangles (``re`` items, or closed four-segment
 ``l`` quads, inside filled drawings), lines are stroked polylines. Numeric tick
 spans aligned along one axis give a linear value scale, non-numeric spans along
 the other axis give categories, legend swatches (tiny filled rects or short
 stroked segments beside a text span) name the series by colour. A numeric span
-printed at a bar's end is preferred over the geometric estimate.
+printed at a bar's end is preferred over the geometric estimate. Filled area
+bands are sampled at category positions; their thickness gives each series value.
 """
 
 from __future__ import annotations
@@ -64,6 +65,7 @@ class Poly:
     bbox: list[float] = field(default_factory=list)
     width: float = 1.0
     dash: str = ""
+    filled: bool = False
 
     @property
     def style(self) -> tuple:
@@ -271,8 +273,28 @@ def pie_tables(slices: list[Slice], spans: list[Span], legend: dict[Color, str],
     return tables
 
 
+def _filled_polygons(items: list, fill: Color) -> list[Poly]:
+    if not items or any(it[0] != "l" for it in items):
+        return []
+    paths: list[list[tuple[float, float]]] = []
+    for _, start, end in items:
+        p0, p1 = (start.x, start.y), (end.x, end.y)
+        if not paths or math.dist(paths[-1][-1], p0) > 0.01:
+            paths.append([p0])
+        paths[-1].append(p1)
+    out: list[Poly] = []
+    for points in paths:
+        xs, ys = [p[0] for p in points], [p[1] for p in points]
+        if len(set(points)) < 4 or max(xs) - min(xs) <= 30 or max(ys) - min(ys) < MIN_BAR:
+            continue
+        if len({round(x, 1) for x in xs}) == len({round(y, 1) for y in ys}) == 2:
+            continue  # rectangles already belong to the bar extractor
+        out.append(Poly(points, fill, [min(xs), min(ys), max(xs), max(ys)], filled=True))
+    return out
+
+
 def page_primitives_full(page: pymupdf.Page) -> tuple[list[Bar], list[Poly], list[list[float]]]:
-    """Bars, coloured polylines, and grey frame/grid path bboxes (plot-area anchors)."""
+    """Bars, filled polygons, coloured lines, and grey frame/grid path bboxes."""
     bars: list[Bar] = []
     polys: list[Poly] = []
     frames: list[list[float]] = []
@@ -282,6 +304,8 @@ def page_primitives_full(page: pymupdf.Page) -> tuple[list[Bar], list[Poly], lis
         color = _rgb(dr.get("color"))
         items = dr.get("items", [])
         if fill is not None:
+            if min(fill[:3]) < 0.97 and dr["rect"].get_area() < 0.35 * page_area:
+                polys.extend(_filled_polygons(items, fill))
             rects = [tuple(it[1]) for it in items if it[0] == "re"]
             rects += _quads_from_lines(items)
             for x0, y0, x1, y1 in rects:
@@ -324,8 +348,9 @@ def _chain(polys: list[Poly]) -> list[Poly]:
     by_style: dict[tuple, list[Poly]] = defaultdict(list)
     for p in polys:
         by_style[p.style].append(p)
-    out: list[Poly] = []
+    out = [p for p in polys if p.filled]
     for style, group in by_style.items():
+        group = [p for p in group if not p.filled]
         group.sort(key=lambda p: (min(x for x, _ in p.points), min(y for _, y in p.points)))
         chains: list[Poly] = []
         for p in group:
@@ -412,7 +437,8 @@ def _page_swatches(bars: list[Bar], polys: list[Poly], tl: TextLayerPage) -> set
 def _plot_cores(page: pymupdf.Page, tl: TextLayerPage) -> list[tuple[list[float], list[float]]]:
     """(core bbox of bars/lines, grown bbox including nearby tick/label spans)."""
     bars, polys, frames = page_primitives_full(page)
-    swatches = _page_swatches(bars, polys, tl)
+    legend, swatches = _legend(bars, polys, [sp for ln in tl.lines for sp in ln.spans])
+    polys = [p for p in polys if not p.filled or p.color in legend]
     big = [b for b in bars if id(b) not in swatches and (b.w > MAX_SWATCH or b.h > MAX_SWATCH or b.w * b.h >= 30)]
     boxes = [[b.x0, b.y0, b.x1, b.y1] for b in big]
     boxes += [p.bbox for p in polys if (p.bbox[2] - p.bbox[0]) > 20 or (p.bbox[3] - p.bbox[1]) > 20]
@@ -620,6 +646,8 @@ def _legend(
                 if b.fill not in names:
                     names[b.fill] = name
     for p in polys:
+        if p.filled:
+            continue
         w, h = p.bbox[2] - p.bbox[0], p.bbox[3] - p.bbox[1]
         if 4 <= w <= 30 and h <= 4 and len(p.points) <= 6:
             name = beside(p.bbox[2], (p.bbox[1] + p.bbox[3]) / 2, 6)
@@ -909,6 +937,69 @@ def _drop_containers(big: list[Bar]) -> list[Bar]:
     return out
 
 
+def _area_bounds(poly: Poly, x: float) -> tuple[float, float] | None:
+    if not poly.bbox[0] - 0.5 <= x <= poly.bbox[2] + 0.5:
+        return None
+    x = min(max(x, poly.bbox[0]), poly.bbox[2])
+    hits: list[float] = []
+    for (x0, y0), (x1, y1) in zip(poly.points, poly.points[1:] + poly.points[:1]):
+        if x0 == x1:
+            if abs(x - x0) < 0.01:
+                hits.extend((y0, y1))
+        elif min(x0, x1) <= x <= max(x0, x1):
+            hits.append(y0 + (y1 - y0) * (x - x0) / (x1 - x0))
+    distinct: list[float] = []
+    for y in sorted(hits):
+        if not distinct or y - distinct[-1] > 0.01:
+            distinct.append(y)
+    if not 1 <= len(distinct) <= 2:
+        return None
+    return distinct[0], distinct[-1]
+
+
+def _area_tables(
+    polys: list[Poly], spans: list[Span], axes: list[Axis], legend: dict[Color, str], panel: str | None
+) -> list[ChartTable]:
+    areas = [p for p in polys if p.filled and p.color in legend]
+    if not areas:
+        return []
+    plot = [min(p.bbox[0] for p in areas), min(p.bbox[1] for p in areas),
+            max(p.bbox[2] for p in areas), max(p.bbox[3] for p in areas)]
+    y_axes = [a for a in axes if a.orient == "y" and not _is_categorical(a.values, a.step) and _outside(a, plot)]
+    if not y_axes:
+        return []
+    axis = max(y_axes, key=lambda a: len(a.coords))
+    exclude = {id(sp) for sp in spans if sp.text.strip() in legend.values()}
+    for a in y_axes:
+        exclude.update(a.span_ids)
+    year_axes = [a for a in axes if a.orient == "x" and _is_categorical(a.values, a.step) and _outside(a, plot)]
+    if year_axes:
+        years = max(year_axes, key=lambda a: len(a.coords))
+        cats = [(x, str(int(v))) for x, v in zip(years.coords, years.values)]
+    else:
+        below = [sp for sp in spans if id(sp) not in exclude and plot[3] - 6 <= sp.bbox[1] <= plot[3] + 40]
+        top = min((sp.bbox[1] for sp in below), default=plot[3])
+        cats = _categories([sp for sp in below if sp.bbox[1] <= top + 4], "y", plot, exclude)
+    if len(cats) < 2:
+        return []
+    colors = [c for c in legend if any(p.color == c for p in areas)]
+    rows: list[list[str]] = []
+    for x, name in cats:
+        values: list[str] = []
+        for color in colors:
+            bands = [_area_bounds(p, x) for p in areas if p.color == color]
+            bands = [b for b in bands if b is not None]
+            value = sum(abs(axis.value(top) - axis.value(bottom)) for top, bottom in bands)
+            values.append(_round_value(value, axis.step, fine=True) if bands else "")
+        if any(values):
+            rows.append([f"{panel} – {name}" if panel else name] + values)
+    if len(rows) < 2:
+        return []
+    title = _chart_title(spans, plot) or ""
+    return [ChartTable(header=[title] + [legend[c] for c in colors], rows=rows,
+                       confidence=0.6, source="vector-area", caption=_caption(title, panel))]
+
+
 def reconstruct_region(
     region: ChartRegion,
     bars: list[Bar] | None = None,
@@ -1026,11 +1117,13 @@ def reconstruct_region(
                 ChartTable(header=[title] + series, rows=[[pre + c] + rows[c] for c in order], confidence=0.6, source="vector", caption=cap)
             )
 
+    tables.extend(_area_tables(polys, spans, all_axes, legend, panel))
+
     # line series
     y_axes = [a for a in axes if a.orient == "y"]
     if polys and y_axes:
         axis = max(y_axes, key=lambda a: len(a.coords))
-        chains = [p for p in polys if (p.bbox[2] - p.bbox[0]) > 30 and len(p.points) >= 3]
+        chains = [p for p in polys if not p.filled and (p.bbox[2] - p.bbox[0]) > 30 and len(p.points) >= 3]
         # one series per stroke style; a series may be drawn as several chains
         by_style: dict[tuple, list[Poly]] = {}
         for p in chains:

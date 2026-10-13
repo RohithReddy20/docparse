@@ -32,27 +32,35 @@ PDF page ─┬─ text layer (PyMuPDF, CPU)  : spans + styling + drawings
           charts     (docparse/charts/)
             • VLM table snapped to printed data labels (textlabels.snap_table)
             • extra candidate tables from text labels and from vector bars/lines
-              scaled by axis ticks (vector.reconstruct_page)
+              scaled by axis ticks (vector.reconstruct_page); filled area bands
+              sampled at category positions, with legend colours naming series
             • chart crops re-read by PaddleOCR-VL-1.6 ("Chart Recognition:",
               serve/modal_chart_crops.py → output/chart_vlm/); HTML / pipe /
               bullet 'label: value' answers become extra candidate tables
 ```
 
-Scores on the **full ParseBench set** (2,078 files; identical VLM output for both
-rows, so every difference is the CPU-side reconciliation):
+Scores on the **full ParseBench set** (2,078 files; identical base VLM outputs
+across variants; the hybrid also uses saved layout detections and chart crops):
 
 | | table | chart | content | formatting | layout | overall |
 |---|---|---|---|---|---|---|
 | LightOnOCR-3-0.8B alone (our provider) | 83.5 | 61.0 | 88.9 | 64.7 | 66.0 | 72.8 |
 | docparse_hybrid_v0 (+ PP-DocLayout-V3 fusion) | 83.5 | 70.4 | 89.0 | 70.6 | 73.8 | 77.5 |
 | docparse_hybrid_v0 (+ Docling heron fusion, legend/panel/pie charts) | 83.5 | 72.5 | 88.9 | 70.7 | 80.4 | 79.2 |
-| docparse_hybrid_v0 (+ PaddleOCR-VL-1.6 chart-crop fallback) | 83.5 | **76.0** | 88.9 | 70.4 | **80.4** | **79.8** |
+| docparse_hybrid_v0 (+ PaddleOCR-VL-1.6 crops, calibrated vector bars/lines/areas; 2026-10-13) | 83.46 | **76.57** | 88.86 | 70.43 | **80.41** | **79.95** |
 | LlamaParse Cost Effective (leaderboard) | 84.2 | 77.9 | 89.9 | 67.3 | 83.8 | 80.6 |
 | best open-weight single model (leaderboard) | 86.4 | 64.9 | 88.8 | 71.7 | 74.3 | 77.2 |
 
-Everything above the first row costs CPU only. Iterate without GPU:
-`scripts/reuse_raw.sh lightonocr3_0_8b_grounding docparse_hybrid_v0` re-normalizes
-saved VLM outputs under the hybrid pipeline and re-evaluates;
+Re-normalizing saved VLM, layout, and chart-crop outputs uses CPU only. The full-set
+rescore above reused all 2,078 raw outputs; initial model inference uses a GPU.
+With the cached outputs and dataset already local, rescore without GPU or downloads:
+
+```bash
+uv run docparse inference renormalize output_heron/docparse_hybrid_v0 --pipeline_name docparse_hybrid_v0 --force
+uv run docparse run docparse_hybrid_v0 --skip_inference --input_dir data --output_dir output_heron --open_report False
+uv run oracle docparse_hybrid_v0 --output_dir output_heron
+```
+
 `scripts/chart_eval.py <module:function>` scores a chart reconstruction against the
 chart rules on all 568 chart pages.
 
