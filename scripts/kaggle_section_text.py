@@ -33,6 +33,7 @@ for name, content in sources.items():
 sys.path.insert(0,str(runtime))
 data=pathlib.Path('/kaggle/input')
 roots=[data,*data.glob('*'),*data.glob('*/*'),*data.glob('*/*/*')]
+roots += [base/'DocLayNet_subset' for base in roots if (base/'DocLayNet_subset').is_dir()]
 train=next((p for base in roots for p in (base/'COCO/train.json',base/'DocLayNet_core/COCO/train.json') if p.is_file()),None)
 pdf=next((p for base in roots for p in (base/'PDF',base/'DocLayNet_extra/PDF') if p.is_dir()),None)
 png=next((p for base in roots for p in (base/'PNG',base/'DocLayNet_core/PNG') if p.is_dir()),None)
