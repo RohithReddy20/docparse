@@ -7,8 +7,8 @@ measured from real GPU-seconds.
 
 ## Method: text layer + small VLM
 
-No single open model exceeds ~77 on ParseBench, and they all share the same
-ceiling because they only look at pixels. 93% of ParseBench pages are born-digital
+Small pixel-only VLMs miss evidence already present in the source PDF.
+93% of ParseBench pages are born-digital
 (`scripts/analyze_text_layer.py`): the PDF text layer carries exact characters,
 bold/underline/strikethrough/highlight, font sizes (heading hierarchy), printed
 chart data labels, and the vector bars of 89% of chart pages. `docparse_hybrid_v0`
@@ -21,15 +21,16 @@ PDF page ─┬─ text layer (PyMuPDF, CPU)  : spans + styling + drawings
                      │
           reconcile  (docparse/hybrid.py)
             • VLM characters retained; styling aligned from native spans,
-              heading levels from font context
+              explicit heading levels preserved, missing levels from font context
             • merged blocks split on paragraph gaps / list items / bold lead lines
             • lines the VLM skipped recovered as blocks; header/footer/page-number
               lifted into structured fields
-            • scanned pages (raster covers the page) keep the VLM output whole
+            • invisible OCR layers keep the VLM output whole; visible native text
+              above background images supplies styling without orphan insertion
           layout     (docparse/fusion.py) — Docling heron (RT-DETRv2, the 17
             Canonical17 classes ParseBench's GT uses; serve/modal_heron_dump.py)
-            boxes are the layout elements, text attributed from the layer; VLM
-            blocks fill what the detector misses; markdown untouched
+            boxes are the layout elements, complete native words attributed
+            locally; VLM blocks fill what the detector misses
           charts     (docparse/charts/)
             • VLM table snapped to printed data labels (textlabels.snap_table)
             • extra candidate tables from text labels and from vector bars/lines
@@ -50,9 +51,15 @@ across variants; the hybrid also uses saved layout detections and chart crops):
 | docparse_hybrid_v0 (+ Docling heron fusion, legend/panel/pie charts) | 83.5 | 72.5 | 88.9 | 70.7 | 80.4 | 79.2 |
 | docparse_hybrid_v0 (+ PaddleOCR-VL-1.6 crops, vector bars/lines/areas, chart table labels, complete Heron class mapping) | 83.46 | 76.79 | 88.84 | 70.43 | 81.01 | 80.11 |
 | docparse_hybrid_v0 (+ calibrated DocLayNet Section/Text reranker; 2026-10-13) | 83.46 | 76.79 | 88.85 | 70.43 | 81.33 | 80.17 |
-| docparse_hybrid_v0 (+ shared native-style alignment; 2026-10-13) | 83.46 | **76.79** | **88.92** | **71.18** | **81.34** | **80.34** |
+| docparse_hybrid_v0 (+ shared native-style alignment; 2026-10-13) | 83.46 | 76.79 | **88.92** | 71.18 | 81.34 | 80.34 |
+| docparse_hybrid_v0 (+ heading/native-text preservation and word attribution; 2026-10-14) | 83.46 | **76.79** | 88.91 | **72.29** | **81.54** | **80.60** |
 | LlamaParse Cost Effective (leaderboard) | 84.2 | 77.9 | 89.9 | 67.3 | 83.8 | 80.6 |
 | best open-weight single model (leaderboard) | 86.4 | 64.9 | 88.8 | 71.7 | 74.3 | 77.2 |
+
+The latest exact overall is **80.597947**, still **0.012053** below the
+80.61 Cost Effective reference. Rounded 80.60 is not a claim of surpassing it.
+The [native-preservation validation](docs/native-preservation.md) records paired
+gains and regressions; production cost remains to be measured.
 
 Re-normalizing saved VLM, layout, and chart-crop outputs uses CPU only. The full-set
 rescore above reused all 2,078 raw outputs; initial model inference uses a GPU.

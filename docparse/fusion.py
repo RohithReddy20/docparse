@@ -199,6 +199,21 @@ def text_digit_heavy(bbox: list[float], tl: TextLayerPage | None) -> bool:
     return bool(text) and sum(c.isdigit() for c in text) > len(text) / 3
 
 
+def _native_box_text(tl: TextLayerPage, bbox: list[float]) -> str:
+    """Attribute complete native words locally, retaining their source spelling."""
+    if os.getenv("DOCPARSE_LAYOUT_TEXT", "words") != "words" or tl.rotation:
+        return " ".join(ln.text.strip() for ln in _lines_in_bbox(tl, bbox))
+    box = [bbox[i] / 1000 * (tl.width if i % 2 == 0 else tl.height) for i in range(4)]
+    pad = 0.004
+    box = [box[0]-pad*tl.width, box[1]-pad*tl.height, box[2]+pad*tl.width, box[3]+pad*tl.height]
+    rows = []
+    for words in tl.line_words:
+        selected = [text for text, word in words if _inter(word, box) / _area(word) >= 0.5]
+        if selected:
+            rows.append(" ".join(selected).strip())
+    return " ".join(rows)
+
+
 def _relabel(block: dict[str, Any], det_label: str, tl: TextLayerPage | None) -> str:
     """Detector class vs VLM class. Headings are never demoted by the detector's
     generic `text`; promotion to a heading needs the text layer to agree; furniture
@@ -302,7 +317,7 @@ def detector_items(
         text = ""
         if tl is not None and tl.has_text and not tl.scanned and (label in TEXTUAL or label in ("image", "chart")):
             # pictures too: infographic text inside a figure is what attribution scores
-            text = " ".join(ln.text.strip() for ln in _lines_in_bbox(tl, d["bbox"]))
+            text = _native_box_text(tl, d["bbox"])
         if not text and over:
             best = max(over, key=lambda b: _inter(b["bbox"], d["bbox"]))
             text = re.sub(r"<[^>]+>", " ", best["text"]) if best["label"] in ("table", "chart") else best["text"]

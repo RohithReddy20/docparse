@@ -9,7 +9,11 @@ points with bboxes as ``[x0, y0, x1, y1]``.
 
 from __future__ import annotations
 
+import os
+import re
 from dataclasses import dataclass, field
+from functools import cached_property
+from typing import Any
 
 import pymupdf
 
@@ -29,6 +33,7 @@ class Span:
     strike: bool = False
     mark: bool = False
     sup: bool = False
+    characters: list[dict[str, Any]] | None = None
 
 
 @dataclass
@@ -47,11 +52,31 @@ class TextLayerPage:
     height: float
     lines: list[Line] = field(default_factory=list)
     body_size: float = 0.0  # most common font size on the page
-    scanned: bool = False  # a raster image covers most of the page: the text layer is OCR output, not source text
+    scanned: bool = False  # Native text is unsafe on an image-dominant page.
+    recover_orphans: bool = True
+    rotation: int = 0
 
     @property
     def has_text(self) -> bool:
         return sum(len(line.text.strip()) for line in self.lines) >= MIN_CHARS_FOR_TEXT_LAYER
+
+    @cached_property
+    def line_words(self) -> list[list[tuple[str, list[float]]]]:
+        rows = []
+        for line in self.lines:
+            if any(span.characters is None for span in line.spans):
+                rows.append([(span.text, span.bbox) for span in line.spans])
+                continue
+            chars = [c for span in line.spans for c in span.characters]
+            text = "".join(c["c"] for c in chars)
+            positions = [c["bbox"] for c in chars for _ in c["c"]]
+            words = []
+            for match in re.finditer(r"\S+", text):
+                boxes = positions[match.start():match.end()]
+                box = [min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes)]
+                words.append((match.group(), box))
+            rows.append(words)
+        return rows
 
 
 def _x_overlap(a: list[float], b: list[float]) -> float:
@@ -133,24 +158,52 @@ def _is_scanned(page: pymupdf.Page) -> bool:
     return False
 
 
+def _has_visible_native_text(page: pymupdf.Page) -> bool:
+    """Trust text above a background image, never hidden or image-covered OCR."""
+    images = [
+        (index, box) for index, (kind, box) in enumerate(page.get_bboxlog())
+        if kind == "fill-image"
+    ]
+    traces = page.get_texttrace()
+    characters = 0
+    for trace in traces:
+        text = "".join(chr(c[0]) for c in trace["chars"] if 0 <= c[0] <= 0x10FFFF)
+        if not text.strip():
+            continue
+        if trace["type"] not in (0, 1) or trace["opacity"] < 0.9 or "glyphless" in trace["font"].lower():
+            return False
+        box = trace["bbox"]
+        if any(
+            index > trace["seqno"]
+            and min(box[2], image[2]) > max(box[0], image[0])
+            and min(box[3], image[3]) > max(box[1], image[1])
+            for index, image in images
+        ):
+            return False
+        characters += len(text.strip())
+    return characters >= MIN_CHARS_FOR_TEXT_LAYER
+
+
 def extract_page(page: pymupdf.Page) -> TextLayerPage:
-    d = page.get_text("dict")
-    out = TextLayerPage(width=page.rect.width, height=page.rect.height)
+    d = page.get_text("rawdict")
+    out = TextLayerPage(width=page.rect.width, height=page.rect.height, rotation=page.rotation)
     sizes: dict[float, int] = {}
     for block in d["blocks"]:
         for raw_line in block.get("lines", []):
             spans: list[Span] = []
             for rs in raw_line["spans"]:
-                if not rs["text"]:
+                text = "".join(c["c"] for c in rs["chars"])
+                if not text:
                     continue
                 font = rs["font"].lower()
                 s = Span(
-                    text=rs["text"],
+                    text=text,
                     bbox=list(rs["bbox"]),
                     size=round(rs["size"], 1),
                     bold=bool(rs["flags"] & _BOLD_FLAG) or "bold" in font or "black" in font or "heavy" in font,
                     italic=bool(rs["flags"] & 2) or "italic" in font or "oblique" in font,
                     sup=bool(rs["flags"] & 1),
+                    characters=rs["chars"],
                 )
                 spans.append(s)
                 if s.text.strip():
@@ -160,6 +213,13 @@ def extract_page(page: pymupdf.Page) -> TextLayerPage:
     if sizes:
         out.body_size = max(sizes.items(), key=lambda kv: kv[1])[0]
     out.scanned = _is_scanned(page)
+    if out.scanned and os.getenv("DOCPARSE_NATIVE_IMAGE_TEXT", "visible") == "visible":
+        try:
+            out.scanned = not _has_visible_native_text(page)
+            if not out.scanned:
+                out.recover_orphans = os.getenv("DOCPARSE_NATIVE_IMAGE_ORPHANS", "skip") != "skip"
+        except Exception:  # noqa: BLE001
+            pass  # Keep the scan policy when visibility cannot be established.
     _apply_drawings(out.lines, page)
     _apply_annots(out.lines, page)
     return out

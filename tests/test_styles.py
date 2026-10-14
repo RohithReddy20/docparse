@@ -100,3 +100,35 @@ def test_adds_styles_around_other_protected_syntax(target):
     line = _line(_span("before code after", bold=True))
     expected = target.replace("before", "**before**").replace("after", "**after**")
     assert transfer_aligned_styles(target, [line]) == expected
+
+
+@pytest.mark.parametrize("target", ["**AB**CD", "AB**CD**", "**A**B**C**"])
+def test_joins_adjacent_bold_at_both_existing_boundaries(monkeypatch, target):
+    monkeypatch.setenv("DOCPARSE_STYLE_JOIN_ADJACENT", "1")
+    text = target.replace("**", "")
+    line = _line(_span(text, bold=True))
+    assert transfer_aligned_styles(target, [line]) == f"**{text}**"
+
+
+def test_joins_question_label_to_native_bold_sentence(monkeypatch):
+    monkeypatch.setenv("DOCPARSE_STYLE_JOIN_ADJACENT", "1")
+    line = _line(_span("Ques: An example question.", bold=True))
+    assert transfer_aligned_styles("**Ques**: An example question.", [line]) == "**Ques: An example question.**"
+
+
+def test_join_does_not_change_existing_combined_emphasis(monkeypatch):
+    monkeypatch.setenv("DOCPARSE_STYLE_JOIN_ADJACENT", "1")
+    line = _line(_span("one", bold=True, italic=True), _span(" two", bold=True))
+    assert transfer_aligned_styles("***one*** two", [line]) == "***one*** **two**"
+
+
+def test_join_keeps_superscript_nested_inside_bold(monkeypatch):
+    monkeypatch.setenv("DOCPARSE_STYLE_JOIN_ADJACENT", "1")
+    line = _line(_span("x", bold=True), _span("2", bold=True, sup=True))
+    assert transfer_aligned_styles("**x**2", [line]) == "**x<sup>2</sup>**"
+
+
+def test_default_joins_adjacent_bold(monkeypatch):
+    monkeypatch.delenv("DOCPARSE_STYLE_JOIN_ADJACENT", raising=False)
+    line = _line(_span("ABCD", bold=True))
+    assert transfer_aligned_styles("**AB**CD", [line]) == "**ABCD**"

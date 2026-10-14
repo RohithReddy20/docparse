@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from docparse.textalign import align_characters, markup_intervals, normalized_view
 from docparse.textlayer import Line
 
@@ -84,6 +86,20 @@ def transfer_aligned_styles(target: str, lines: list[Line]) -> str:
                 first = None
     if not ranges:
         return target
+    join_before, join_after, removed = set(), set(), set()
+    if os.getenv("DOCPARSE_STYLE_JOIN_ADJACENT", "1") == "1":
+        for a, b, attr in ranges:
+            if attr != "bold":
+                continue
+            for x, y, style in existing:
+                if style != "bold":
+                    continue
+                if a == y + 2 and target[y:a] == "**":
+                    join_before.add(a)
+                    removed.update(range(y, a))
+                if x == b + 2 and target[b:x] == "**":
+                    join_after.add(b)
+                    removed.update(range(b, x))
     boundaries = sorted({0, len(target), *(p for a, b, _ in ranges for p in (a, b))})
     out = []
     active = []
@@ -92,9 +108,9 @@ def transfer_aligned_styles(target: str, lines: list[Line]) -> str:
         common = 0
         while common < min(len(active), len(desired)) and active[common] == desired[common]:
             common += 1
-        out.extend(_CLOSE[attr] for attr in reversed(active[common:]))
-        out.extend(_OPEN[attr] for attr in desired[common:])
-        out.append(target[start:stop])
+        out.extend(_CLOSE[attr] for attr in reversed(active[common:]) if attr != "bold" or start not in join_after)
+        out.extend(_OPEN[attr] for attr in desired[common:] if attr != "bold" or start not in join_before)
+        out.append("".join(target[i] for i in range(start, stop) if i not in removed))
         active = desired
     out.extend(_CLOSE[attr] for attr in reversed(active))
     return "".join(out)

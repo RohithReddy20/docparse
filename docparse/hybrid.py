@@ -144,6 +144,14 @@ def _heading_level(lines: list[Line], tl: TextLayerPage) -> int:
     return min(6, 1 + len(page_sizes))
 
 
+def _title_level(text: str, lines: list[Line], tl: TextLayerPage) -> int:
+    if os.getenv("DOCPARSE_HEADING_LEVEL_POLICY", "preserve_explicit") == "preserve_explicit":
+        headings = list(re.finditer(r"^\s*(#{1,6})[ \t]+\S", text, re.M))
+        if len(headings) == 1 and headings[0].start() == 0:
+            return len(headings[0].group(1))
+    return _heading_level(lines, tl)
+
+
 def _paragraphs(lines: list[Line]) -> list[list[Line]]:
     """Split consecutive lines on vertical gaps clearly larger than the running
     line pitch (a blank line between paragraphs); single lines are their own group."""
@@ -346,9 +354,9 @@ def render_blocks(
         return None
     vlm = block["text"]
     if block["label"] == "title":
-        # VLM characters; the layer gives the heading level (font size) and the
-        # split between stacked headings (vertical gaps), never line wraps.
-        level = _heading_level(lines, tl)
+        # Explicit VLM levels win; native font context supplies missing levels
+        # and vertical gaps split stacked headings without breaking line wraps.
+        level = _title_level(vlm, lines, tl)
         groups = _paragraphs(lines)
         plain = _heading_text(re.sub(r"^\s*#{1,6}\s*", "", vlm, flags=re.M))
         if len(groups) <= 1:
@@ -494,7 +502,7 @@ def reconcile_page(blocks: list[dict[str, Any]], tl: TextLayerPage | None) -> li
         if rendered is None:
             covered |= before
         out.extend(rendered if rendered is not None else [dict(b)])
-    return _insert_orphans(out, tl, covered)
+    return _insert_orphans(out, tl, covered) if tl.recover_orphans else out
 
 
 def _box_pts(bbox1000: list[float], tl: TextLayerPage) -> tuple[float, float, float, float]:
